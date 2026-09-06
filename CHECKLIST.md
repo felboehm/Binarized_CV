@@ -104,10 +104,25 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
     early fusion.
 - [ ] Get the full WiSARDv1 download (not just the sample) once the pipeline
       is validated, and check whether it defines its own split
-- [ ] Write a converter/loader that filters `.DS_Store` and handles TRGB's
-      mangled test folder name, and pairs WiSARD frames by numeric index
-      across its two folders — common interface: paired RGB+thermal image +
-      YOLO label, regardless of source dataset
+- [x] Data loader/converter implemented (`src/binarized_cv/data/`):
+      `datasets/trgb.py` and `datasets/wisard.py` discover RGB+IR pairs and
+      emit a common `PairRecord`; `manifest.py` combines both into one
+      manifest (`scripts/build_manifest.py` writes it to
+      `data/processed/manifest.jsonl`); `dataset.py` has a
+      `MultispectralPersonDataset` (PyTorch) that loads images + YOLO boxes
+      per pair. Verified against the real downloaded data: **4772 TRGB
+      pairs** (matches the documented 4118/324/330 split exactly) and
+      **263 WiSARD pairs** (264 frames minus 1 unmatched). Along the way,
+      found and fixed a real bug: TRGB mixes bare-numeric and
+      modality-prefixed (`RGB_####`/`IR_####`) filenames *within the same
+      folder* — naive exact-stem matching silently dropped ~1737 pairs
+      (2729/4118 caught) until fixed to canonicalize both naming schemes to
+      the same id before pairing. 16 unit tests (`tests/test_labels.py`,
+      `test_trgb_discovery.py`, `test_wisard_discovery.py`,
+      `test_manifest.py`) cover both datasets' quirks with synthetic
+      fixtures, so they run without the (gitignored) real data present.
+      No augmentation/resizing/normalization yet — deferred to the training
+      pipeline once the fusion architecture is decided.
 - [ ] Decide how TRGB and WiSARD are used relative to each other: combined
       training set, or one for training + one for cross-dataset
       generalization evaluation (the latter is often more useful for

@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from binarized_cv.data.records import PairRecord
+
+_DIR_PATTERN = re.compile(r"^(?P<prefix>.+)_(?P<modality>VIS|IR)_(?P<seq>\d+)$")
+_FRAME_PATTERN = re.compile(r"_(?P<frame>\d{8})\.jpe?g$", re.IGNORECASE)
+
+
+def _group_flight_dirs(wisard_root: Path) -> dict[str, dict[str, Path]]:
+    groups: dict[str, dict[str, Path]] = {}
+    for entry in sorted(p for p in wisard_root.rglob("*") if p.is_dir()):
+        match = _DIR_PATTERN.match(entry.name)
+        if not match:
+            continue
+        prefix = match.group("prefix")
+        modality = match.group("modality").lower()
+        groups.setdefault(prefix, {})[modality] = entry
+    return groups
+
+
+def _frame_stems(modality_dir: Path) -> dict[str, str]:
+    frames: dict[str, str] = {}
+    for p in modality_dir.glob("*.jpeg"):
+        match = _FRAME_PATTERN.search(p.name)
+        if match:
+            frames[match.group("frame")] = p.stem
+    return frames
+
+
+def discover_wisard(
+    raw_root: Path, dataset_dir_name: str = "wisard", split: str = "unassigned"
+) -> list[PairRecord]:
+    raw_root = Path(raw_root)
+    wisard_root = raw_root / dataset_dir_name
+    records: list[PairRecord] = []
+    for prefix, modality_dirs in sorted(_group_flight_dirs(wisard_root).items()):
+        if "vis" not in modality_dirs or "ir" not in modality_dirs:
+            continue
+        vis_dir, ir_dir = modality_dirs["vis"], modality_dirs["ir"]
+        vis_frames, ir_frames = _frame_stems(vis_dir), _frame_stems(ir_dir)
+        for frame in sorted(vis_frames.keys() & ir_frames.keys()):
+            vis_stem, ir_stem = vis_frames[frame], ir_frames[frame]
+            records.append(
+                PairRecord(
+                    id=f"wisard_{prefix}_{frame}",
+                    dataset="wisard",
+                    split=split,
+                    rgb_image=(vis_dir / f"{vis_stem}.jpeg").relative_to(raw_root).as_posix(),
+                    rgb_label=(vis_dir / f"{vis_stem}.txt").relative_to(raw_root).as_posix(),
+                    ir_image=(ir_dir / f"{ir_stem}.jpeg").relative_to(raw_root).as_posix(),
+                    ir_label=(ir_dir / f"{ir_stem}.txt").relative_to(raw_root).as_posix(),
+                )
+            )
+    return records

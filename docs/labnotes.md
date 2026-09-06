@@ -69,3 +69,24 @@ chapter later.
   provided by either dataset to do the warping ourselves reliably.
 - Next: pull the full WiSARDv1 set (currently only have the sample) and
   check whether it defines a split; write the shared data loader.
+
+## 2026-09-06 (data loader)
+
+- Built the shared data loader/converter: per-dataset discovery
+  (`data/datasets/trgb.py`, `data/datasets/wisard.py`) producing a common
+  `PairRecord`, a manifest builder/CLI (`scripts/build_manifest.py` →
+  `data/processed/manifest.jsonl`), and a PyTorch `MultispectralPersonDataset`.
+- Ran it against the real downloaded data and caught a real bug before it
+  could silently bias training: TRGB filenames use two different
+  conventions *within the same folder* — some pairs are named by a bare
+  numeric id (`8251066.jpg` in both RGB and IR folders), others by a
+  modality-prefixed id (`RGB_1505.jpg` / `IR_1505.jpg`, same number,
+  different prefix per modality). Naive exact-stem intersection only
+  matched the bare-numeric ones, silently dropping 1737 of 4772 pairs
+  (avg ~36%) — would have meant training on a biased subset without any
+  error. Fixed by canonicalizing both naming schemes to the same id before
+  matching. Manifest count now matches the documented split exactly
+  (4118/324/330 for TRGB, 263 of 264 WiSARD sample frames).
+- 16 unit tests added, all using synthetic tmp-dir fixtures (not the real
+  gitignored data) so they run in a fresh checkout/CI without the datasets
+  present.
