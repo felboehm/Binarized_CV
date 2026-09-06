@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project: datasets, checkpoints, experiment outputs
+/data/*
+!/data/.gitkeep
+/runs/*
+!/runs/.gitkeep
+wandb/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+

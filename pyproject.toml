@@ -1,0 +1,32 @@
+[project]
+name = "binarized-cv"
+version = "0.1.0"
+description = "Binarized multispectral YOLO26 for onboard UAV computer vision"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "numpy",
+    "opencv-python",
+    "pyyaml",
+    "hydra-core",
+    "tqdm",
+    "tensorboard",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
