@@ -6,25 +6,27 @@ UAV deployment, while quantifying the accuracy trade-off against
 full-precision YOLO26 and other SOTA efficient/edge detectors.
 
 ## 1. Scoping & Literature Review
-- [ ] Define thesis question precisely (which task: detection only, or also
-      tracking/segmentation? which UAV use case: search & rescue, surveillance,
-      obstacle avoidance?)
+- [x] Thesis use case: **aerial person detection (search & rescue-adjacent)**,
+      fixed by the TRGB/VTSaR dataset choice — task is detection only
 - [ ] Survey binarization methods for CNNs/detectors: XNOR-Net, Bi-Real Net,
       ReActNet, BiDet, BNext, IR-Net — pick which technique(s) to adapt to YOLO26
 - [ ] Survey prior binarized/quantized YOLO work (BiDet, BNN-YOLO variants) to
       identify gaps and avoid duplicating known-negative results
 - [ ] Survey multispectral/RGB-IR fusion detection architectures (e.g. CFT,
-      ICAFusion, CFR-3, DroneVehicle baseline methods) — identify a fusion
-      point (early/mid/late) that is both accurate and binarization-friendly
+      ICAFusion, CFR-3) — identify a fusion point (early/mid/late) that is
+      both accurate and binarization-friendly
+- [ ] Read the VTSaR paper ("Robust Aerial Person Detection with Lightweight
+      Distillation Network for Edge Deployment", IEEE TGRS 2024) in full —
+      closest existing work to this thesis's goal, should anchor the
+      related-work section and comparison model list
 - [ ] Identify which YOLO26 layers are binarization-resistant (first/last layer,
       detection head, and now the modality-fusion layer) — decide a
       full-vs-partial binarization strategy
-- [ ] Pick 2-4 SOTA comparison models — prefer ones with published
-      multispectral/RGB-IR results if available (e.g. a DroneVehicle
-      leaderboard method), otherwise a strong single-modality baseline
-      (YOLO26 fp32, a pruned/distilled variant, another binarized detector)
-      run on the same fused input — must be reproducible with available
-      code/weights
+- [ ] Pick 2-4 SOTA comparison models — VTSaR's own lightweight/distilled
+      detector is a strong candidate given it's evaluated on this exact data;
+      otherwise a strong single-modality baseline (YOLO26 fp32, a
+      pruned/distilled variant, another binarized detector) run on the same
+      fused input — must be reproducible with available code/weights
 - [ ] Write thesis proposal / research plan, get advisor sign-off
 
 ## 2. Environment & Repo Setup
@@ -42,27 +44,46 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
 - [ ] Set up CI or at minimum a lint/test pre-commit hook
 
 ## 3. Data
-- [x] Dataset scope decided: **UAV-specific and multispectral** — general
-      RGB-only sets (COCO, VisDrone, DOTA) are out since they lack a second
-      modality. Primary candidate: **DroneVehicle** (RGB+IR paired aerial
-      imagery, vehicle detection, ~28k image pairs, established benchmark
-      with published baselines to compare against). Alternatives to check if
-      DroneVehicle doesn't fit the use case: **VTUAV** (RGB-thermal, UAV
-      tracking — usable for detection via per-frame boxes), **Anti-UAV**
-      (thermal, but detects UAVs themselves rather than from a UAV)
-- [ ] Confirm final dataset choice covers the object classes relevant to the
-      thesis use case (DroneVehicle is vehicle-only — decide if that's
-      sufficient scope or if a broader-class set is needed)
-- [ ] Confirm modality pairing/registration quality (RGB and IR frames must
-      be spatially aligned — check the dataset's calibration/registration
-      documentation)
-- [ ] Establish train/val/test splits matching what comparison papers use, so
-      numbers are citable apples-to-apples
-- [ ] Data pipeline: download scripts, format conversion to YOLO label format
-      with paired RGB+IR inputs, augmentation config (must apply identically
-      to both modalities to preserve alignment)
-- [ ] Sanity-check class balance and small-object density (UAV imagery skews
-      toward small objects — relevant for detector choice/anchors)
+- [x] Dataset(s) decided: **TRGB and VTSaR** — both RGB+thermal aligned,
+      single class (**person**), matching the multispectral requirement.
+      Both are class-compatible (both person-only), so combining or
+      cross-evaluating between them is straightforward.
+  - **TRGB** — repo: github.com/godhj93/trgb_dataset. From "Rapid and Safe
+    Human Detection in Uninhabited Terrains Integrating Formation Flight and
+    Multispectral Imaging" (IJCAS 2025). Aerial RGB+thermal, mountainous/
+    forested uninhabited terrain. **License: CC BY-NC 4.0 — non-commercial
+    only**, fine for thesis use but note if the repo/thesis is ever
+    dual-licensed or productized later. Download: Google Drive link in repo
+    README. No code/format docs in the repo itself.
+  - **VTSaR** — repo: github.com/zxq309/VTSaR. From "Robust Aerial Person
+    Detection with Lightweight Distillation Network for Edge Deployment"
+    (IEEE TGRS 2024) — **directly relevant related work / potential
+    comparison baseline**, since it's already doing edge-efficient aerial
+    person detection on this exact data. Has a real-capture subset (A-VTSaR,
+    dual-camera gimbal RGB+IR) and a synthetic mosaic-augmented subset
+    (AS-VTSaR). Download: Baidu Pan (may need a workaround/VPN outside
+    China — flag as a practical access risk). License not stated in README —
+    confirm before any redistribution or public repo use. No code/format
+    docs in the repo itself.
+- [ ] Download both datasets and inspect actual file layout: annotation
+      format (YOLO txt / COCO json / XML), image resolution, RGB/thermal
+      pairing convention, existing train/val/test split (none is documented
+      in either README — likely need to create one)
+- [ ] Write a converter for each to a common internal format (paired
+      RGB+thermal image + YOLO-style label) so both datasets share one
+      loader
+- [ ] Decide how TRGB and VTSaR are used relative to each other: combined
+      training set, or one for training + one for cross-dataset
+      generalization evaluation (the latter is often more useful for
+      "credible claims" since it tests out-of-distribution robustness) —
+      TRGB's forest/mountain terrain vs. VTSaR's more varied scenes makes a
+      cross-dataset generalization test a natural fit
+- [ ] Read the VTSaR paper in full — its distillation/lightweight approach
+      is close enough to this thesis's efficiency goal that it should shape
+      the related-work section and possibly the comparison model list
+- [ ] Sanity-check class balance and small-object density across both
+      datasets (aerial person imagery skews toward small objects — relevant
+      for detector choice/anchors)
 
 ## 4. Baseline Model
 - [ ] Decide multispectral fusion architecture: early fusion (concat RGB+IR
@@ -75,9 +96,9 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
 - [ ] Get the extended YOLO26 reference implementation running end-to-end
       (train + eval) on the chosen multispectral dataset at full precision —
       this is your accuracy/speed/power upper bound
-- [ ] Reproduce or closely match published baseline metrics (from
-      DroneVehicle leaderboard or comparable) before touching binarization,
-      so later deltas are trustworthy
+- [ ] Reproduce or closely match published baseline metrics (from the VTSaR
+      paper or comparable) before touching binarization, so later deltas
+      are trustworthy
 - [ ] Establish baseline inference benchmarking harness (latency, FPS) on
       target hardware
 
