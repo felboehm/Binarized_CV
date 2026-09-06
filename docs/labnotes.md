@@ -46,3 +46,26 @@ chapter later.
   visual-thermal aerial person detection — similar enough in domain that
   combining them for training (rather than cross-dataset eval) may make
   more sense; revisit once both are downloaded and inspected.
+
+## 2026-09-06 (data inspection)
+
+- Both datasets downloaded (WiSARD: multi-modal sample only, one flight,
+  264 pairs) and inspected directly. Both use YOLO-txt labels, single class
+  `0` = person — no format conversion needed, straightforward to load.
+- TRGB: pre-split train/val/test (4118/324/330 pairs), RGB 1280×800, IR
+  640×512. Minor cleanup needed: `.DS_Store` files, and the test RGB folder
+  is named `RGB_images_test copy` (macOS artifact).
+- WiSARD sample: no split, 264 VIS (3840×2160) + 264 IR (640×512) frames,
+  paired by matching numeric frame index across two separately-named
+  folders.
+- **Important finding**: neither dataset is pixel-registered between
+  modalities — resolutions differ substantially (TRGB ~2×, WiSARD ~6×) and
+  per-modality label coordinates for the same instance don't match (checked
+  a TRGB pair directly). "Aligned" in both papers means temporally
+  synchronized, not spatially co-registered. This rules out naive early
+  fusion via channel-concat without a warping step, and leans the fusion
+  architecture decision toward mid/late fusion with learned alignment
+  (CFT/ICAFusion-style) instead — no ground-truth calibration/homography is
+  provided by either dataset to do the warping ourselves reliably.
+- Next: pull the full WiSARDv1 set (currently only have the sample) and
+  check whether it defines a split; write the shared data loader.

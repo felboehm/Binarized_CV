@@ -75,20 +75,45 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
     validate the pipeline before pulling the full set. Annotation format,
     resolution, and formal splits not documented on the site — inspect
     after download.
-- [ ] Download both datasets (start with the WiSARD multi-modal sample) and
-      inspect actual file layout: annotation format (YOLO txt / COCO json /
-      XML), image resolution, RGB/thermal pairing convention, existing
-      train/val/test split (not documented for either — likely need to
-      create one)
-- [ ] Write a converter for each to a common internal format (paired
-      RGB+thermal image + YOLO-style label) so both datasets share one
-      loader
+- [x] Both datasets downloaded and inspected (WiSARD: multi-modal sample
+      only, 1 flight sequence). Confirmed facts:
+  - **Annotation format**: both use YOLO-style txt (`class x_center y_center
+    width height`, normalized 0-1), single class `0` = person. Directly
+    compatible with a standard YOLO loader, no format conversion needed.
+  - **TRGB**: pre-split train/val/test. RGB images 1280×800, IR images
+    640×512. Counts: train 4118 pairs, val 324 pairs, test 330 pairs (the
+    test RGB folder is macOS-mangled as `RGB_images_test copy` — needs
+    renaming/handling in the loader). `.DS_Store` files present, need
+    filtering.
+  - **WiSARD sample**: one flight (`210417_MtErie_Enterprise`), 264 VIS +
+    264 IR frames, paired 1:1 by numeric frame index across two separate
+    folders (`..._VIS_0003/`, `..._IR_0004/` — folder *names* don't match,
+    frame indices in the filenames do). VIS frames 3840×2160, IR frames
+    640×512. No train/val/test split — this is expected to come from the
+    full WiSARDv1 download, need to check whether the full set defines one
+    or we split ourselves.
+  - **Critical: neither dataset is pixel-registered.** RGB/VIS and IR labels
+    are independent per-modality annotations with different normalized box
+    coordinates for the same instance (verified on a TRGB pair) — "aligned"
+    in both papers means *temporally synchronized*, not *spatially
+    co-registered*. Combined with the large resolution mismatches (TRGB
+    ~2×, WiSARD ~6× between modalities), **naive early fusion by
+    channel-concatenation is not viable without a warping/homography step**.
+    This pushes the fusion architecture decision (section 4) toward mid/late
+    fusion or a learned-alignment approach (CFT/ICAFusion-style), not simple
+    early fusion.
+- [ ] Get the full WiSARDv1 download (not just the sample) once the pipeline
+      is validated, and check whether it defines its own split
+- [ ] Write a converter/loader that filters `.DS_Store` and handles TRGB's
+      mangled test folder name, and pairs WiSARD frames by numeric index
+      across its two folders — common interface: paired RGB+thermal image +
+      YOLO label, regardless of source dataset
 - [ ] Decide how TRGB and WiSARD are used relative to each other: combined
       training set, or one for training + one for cross-dataset
       generalization evaluation (the latter is often more useful for
       "credible claims" since it tests out-of-distribution robustness) —
       both are wilderness/forest terrain so may be similar enough to combine
-      rather than cross-evaluate; revisit once both are inspected
+      rather than cross-evaluate; revisit once the full WiSARD set is in
 - [ ] Sanity-check class balance and small-object density across both
       datasets (aerial person imagery skews toward small objects — relevant
       for detector choice/anchors)
@@ -98,7 +123,17 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       channels before the stem), mid fusion (twin-stream backbones merged at
       a middle stage), or late fusion (separate backbones, merge at
       neck/head) — early/mid fusion is usually more binarization-friendly
-      since it avoids doubling full-precision backbone compute
+      since it avoids doubling full-precision backbone compute.
+      **Constraint from actual data (section 3): TRGB and WiSARD are not
+      pixel-registered between modalities (different resolutions, different
+      per-modality label coordinates) — plain early fusion by channel-concat
+      won't work as-is.** Options: (a) resize+warp/homography-align IR to
+      RGB coordinate space as a preprocessing step, enabling early fusion;
+      (b) skip pixel alignment and use mid/late fusion with independent
+      per-modality feature extraction merged via a learned module (e.g.
+      cross-attention, as in CFT/ICAFusion); (b) is likely lower-risk given
+      no ground-truth camera calibration/homography is provided by either
+      dataset
 - [ ] Extend YOLO26 input stem/backbone for the chosen fusion point and
       4-6 channel (RGB+IR) input
 - [ ] Get the extended YOLO26 reference implementation running end-to-end
