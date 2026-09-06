@@ -219,7 +219,17 @@ __marimo__/
 
 # Project: datasets, checkpoints, experiment outputs
 /data/*
-!/data/.gitkeep
+!/data/raw/
+!/data/processed/
+/data/raw/*
+!/data/raw/trgb/
+!/data/raw/wisard/
+/data/raw/trgb/*
+!/data/raw/trgb/.gitkeep
+/data/raw/wisard/*
+!/data/raw/wisard/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
 /runs/*
 !/runs/.gitkeep
 wandb/
