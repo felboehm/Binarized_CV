@@ -45,10 +45,35 @@ pip install -e ".[dev]"
 
 ## Usage
 
-### Quick start
+### 0. Download datasets
 
-Once the raw data is in place (see "Prepare data" below), run the whole
-loop — manifest, train, eval — in one command:
+If you don't have the datasets locally, use the download script to fetch them
+automatically from Google Drive:
+
+```bash
+# Interactive: prompts which datasets/variants to download
+python scripts/download_data.py
+
+# Or with options:
+python scripts/download_data.py --wisard sample    # TRGB + WiSARD sample
+python scripts/download_data.py --wisard full      # TRGB + WiSARD full
+python scripts/download_data.py --trgb-only        # TRGB only
+python scripts/download_data.py --no-prompt        # Download defaults (TRGB + sample) without prompting
+```
+
+The script will:
+- Check if datasets already exist (skip if present)
+- Download from Google Drive (using `gdown`)
+- Extract to `data/raw/{trgb,wisard}/`
+- Clean up the zip files
+
+Note: WiSARD full is ~40.5GB and takes a while to download. Use the sample
+(~972MB) to validate the pipeline quickly.
+
+### 1. Quick start
+
+Once the raw data is in place, run the whole loop — manifest, train, eval —
+in one command:
 
 ```bash
 ./scripts/run_pipeline.sh
@@ -61,7 +86,7 @@ environment variables, e.g. `MODEL=ms_yolov8 EPOCHS=30 DEVICE=cuda
 real training recipe — see the steps below to run each stage by hand with
 full control.
 
-### 1. Prepare data
+### 2. Prepare data
 
 Place the raw datasets under `data/raw/` (gitignored) matching the layout
 `src/binarized_cv/data/datasets/{trgb,wisard}.py` expect:
@@ -77,7 +102,7 @@ Then build the manifest that every dataset loader reads from:
 python scripts/build_manifest.py --raw-root data/raw --out data/processed/manifest.jsonl
 ```
 
-### 2. Train a model
+### 3. Train a model
 
 ```bash
 python -m binarized_cv.train.train model=yolo26
@@ -113,7 +138,7 @@ tensorboard --logdir runs/tensorboard
 `train.device` defaults to `cuda` and automatically falls back to `cpu` if
 no GPU is available.
 
-### 3. Evaluate a checkpoint
+### 4. Evaluate a checkpoint
 
 ```bash
 python -m binarized_cv.eval.evaluate model=yolo26 eval.checkpoint_path=runs/checkpoints/epoch_49.pt
