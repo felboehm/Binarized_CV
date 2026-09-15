@@ -1,0 +1,5 @@
+name: yolo26
+num_classes: 1
+img_size: [640, 640]
+scale: n
+pretrained: false

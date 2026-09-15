@@ -1,0 +1,6 @@
+defaults:
+  - data: default
+  - model: simple_fusion
+  - train: default
+  - eval: default
+  - _self_

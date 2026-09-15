@@ -90,3 +90,198 @@ chapter later.
 - 16 unit tests added, all using synthetic tmp-dir fixtures (not the real
   gitignored data) so they run in a fresh checkout/CI without the datasets
   present.
+
+## 2026-09-07 (plug-and-play model scaffolding)
+
+- Built the model side of the pipeline as a plug-and-play system: a
+  `BaseDetector` interface (`src/binarized_cv/models/base.py`) every model
+  must implement, and a name-based `MODEL_REGISTRY`/`build_model`
+  (`registry.py`) so a new model (binarized backbone, a different fusion
+  module, a reimplemented comparison model) only needs to subclass
+  `BaseDetector` and add `@register_model("name")` — the data loading,
+  training loop, and eval loop never need to change. The contract mirrors
+  torchvision's detection-model convention: `forward(images, targets=None)`
+  returns a loss dict when `targets` is given (training) or a list of
+  per-image `{"boxes" (xyxy px), "scores", "labels"}` detections otherwise
+  (inference) — decided this deliberately so training/eval code is agnostic
+  to whatever's inside the model.
+- **Resolved an open design question this required**: since RGB and IR
+  labels aren't spatially co-registered (2026-09-06 finding), a fused model
+  needs one coordinate frame to be supervised/evaluated against. Decided
+  **RGB as primary** — losses and detections are in RGB pixel space, IR
+  feeds in as an auxiliary input stream only, its own labels unused. Matches
+  RGB's higher resolution and the convention in CFT/ICAFusion-style fusion
+  papers. (Alternatives considered: IR-primary, since thermal is often the
+  more reliable SAR signal; or a dual-head model with one output per
+  modality — deferred, more complexity than a first basic model needs.)
+- Implemented one concrete basic detector (`simple_fusion`) built entirely
+  from reusable pieces, each usable independently later: `SimpleCNNBackbone`
+  (fp32 stride-32 conv stack, one instance per modality — a binarized
+  backbone is a drop-in as long as it keeps the same in/out-channel
+  contract), `ConcatFusion` (mid fusion: channel-concat same-resolution
+  per-modality features + 1x1 conv projection), `AnchorFreeHead` (single-
+  scale YOLOv1-style head — one grid cell responsible per GT box center,
+  direct sigmoid box/objectness/class regression, own `compute_loss` +
+  `postprocess`/NMS). This is explicitly a placeholder to prove the full
+  pipeline works, not a step toward accuracy — the real YOLO26 head/backbone
+  and the eventual CFT/ICAFusion-style learned fusion are separate,
+  not-yet-started work (CHECKLIST.md section 4).
+- Reworked the data contract to match: `MultispectralPersonDataset` now
+  resizes both modalities independently to a configured `img_size` (a plain
+  per-axis resize needs no box coordinate remapping, since labels are
+  already normalized fractions of each image's own dimensions) and returns
+  a single `targets` dict from `target_modality`'s boxes instead of the
+  previous separate `rgb_boxes`/`ir_boxes`. Added `detection_collate` to
+  batch variable-length per-image targets.
+- Added a minimal custom single-class VOC-style `average_precision` metric
+  (`eval/metrics.py`) instead of adding `torchmetrics` as a dependency —
+  `torchvision.ops.box_iou`/`nms`, already a listed dependency, were enough.
+  Full `mAP@0.5:0.95` + per-class breakdown is still open (CHECKLIST.md
+  section 7).
+- Wired up Hydra configs (`configs/{data,model,train,eval}/default.yaml` +
+  root `configs/config.yaml`) and `train/train.py` / `eval/evaluate.py` CLI
+  scripts. **Found a real environment bug along the way**: hydra-core 1.3.6
+  (latest release)'s `@hydra.main` CLI decorator crashes on Python 3.14 —
+  its argparse-based `--shell-completion` setup hits a `LazyCompletionHelp`
+  object against a newer, stricter argparse `help`-string check
+  (`TypeError`/`ValueError: badly formed help string`), unrelated to this
+  repo's code. Worked around it by using Hydra's `compose`/`initialize` API
+  directly instead of the `@hydra.main` decorator — same YAML composition
+  and dotted-override CLI syntax, different (unaffected) code path. No fix
+  exists upstream yet; revisit if hydra-core cuts a Python 3.14-compatible
+  release.
+- Verified the whole pipeline end-to-end on synthetic data (tiny
+  TRGB-shaped fixture, not the real gitignored dataset): manifest build ->
+  dataloader -> `simple_fusion` model -> training loop (loss decreases,
+  checkpoints written) -> eval script (loads a checkpoint, computes AP).
+  37 unit tests total (21 new: registry, backbone, fusion, head, detector,
+  collate, dataset, metrics), all synthetic-fixture based per existing
+  convention; ruff clean.
+
+## 2026-09-07 (later — real YOLO26 wired in)
+
+- **Decided to depend on the real `ultralytics` package rather than
+  reimplement YOLO26 from scratch.** Researched YOLO26 (Ultralytics, Sept
+  2025) first: CSP-Darknet backbone (C3k2/SPPF/C2PSA blocks, same shape as
+  YOLO11's) → PAN neck (P3/P4/P5) → a dual head that's both NMS-free
+  (native end-to-end one2one branch, no separate NMS call) and DFL-free
+  (`reg_max: 1` makes the DFL module a literal `nn.Identity()`). Full
+  architecture confirmed by reading the actual installed package source
+  (`ultralytics/cfg/models/26/yolo26.yaml`, `nn/tasks.py`, `nn/modules/head.py`)
+  and empirically running forward/backward passes — not from blog posts,
+  which don't document the backbone/neck in enough detail to reimplement
+  faithfully. Trade-off accepted knowingly: `ultralytics` is **AGPL-3.0**,
+  so depending on it obligates this repo to AGPL-3.0 too (or an Enterprise
+  license) — flagged as a still-open item in `CHECKLIST.md` section 12
+  rather than resolved unilaterally, since adding a LICENSE file is a
+  repo-wide, public, hard-to-reverse decision.
+- Wired it in as `yolo26` (`src/binarized_cv/models/detectors/yolo26.py`),
+  wrapping `ultralytics.nn.tasks.DetectionModel` behind `BaseDetector`.
+  RGB-only for now (`modalities = ("rgb",)`) — extending the input stem for
+  RGB+IR fusion is separate follow-on work. Key integration points learned
+  from reading the real source:
+  - `DetectionModel.forward(x)` dispatches on type: a tensor → inference
+    (`self.predict`), a dict → training loss (`self.loss`). No separate
+    train/eval method to call.
+  - The loss dict format (`{"img", "batch_idx", "cls", "bboxes"}`) needs
+    `bboxes` as normalized cxcywh — **exactly our own `targets` box format
+    already** (per-image list → flattened with a `batch_idx` mapping each
+    box back to its image), so no coordinate conversion was needed, only
+    reshaping from our per-image list into ultralytics' flat-batch form.
+  - `model.args` must be set (`ultralytics.cfg.get_cfg(overrides={})`)
+    before the first loss call — normally injected by ultralytics' own
+    `Trainer`, which we're bypassing.
+  - Eval-mode output `(B, <=300, 6)` (`xyxy, score, class`, pixel-scale) is
+    already NMS-free-decoded and top-k selected by the model itself, but
+    **not confidence-thresholded or clamped to image bounds** — both added
+    on our side to match the `BaseDetector` eval-mode contract.
+  - `BaseModel.load()` tolerates a different `nc` (extra/missing final
+    layer just isn't loaded) and even a different first-conv channel count
+    (copies the overlapping channel sub-tensor) — relevant later for
+    loading pretrained COCO weights into a modified multispectral stem.
+- Fixed a real bug this surfaced in the plug-and-play system itself:
+  `train.py`/`evaluate.py` were hardcoding `simple_fusion`-specific
+  constructor kwargs (`backbone_widths`, `fusion_channels`) when building
+  the model from config — would have broken for every other model,
+  defeating the entire point of the registry. Replaced with
+  `registry.build_model_from_config(model_cfg)`, which passes every field
+  in `configs/model/<name>.yaml` through as a kwarg generically (also
+  converting YAML list fields like `img_size` to tuples) — a new model now
+  only needs its own config file, no training-script changes.
+- Verified end-to-end on synthetic data through the *unmodified*
+  `train.py`/`evaluate.py` CLI, just switching `model=yolo26`: trains,
+  checkpoints, and evaluates exactly like `simple_fusion` did — the
+  plug-and-play claim now has two very different models (a toy CNN and a
+  real production architecture) proving it out, not just one.
+
+## 2026-09-07 (later still — first comparison model: ms_yolov8)
+
+- User pointed at github.com/frnc96/ms-yolov8 as a candidate comparison
+  model. Cloned and read it directly: an `ultralytics` (YOLOv8) fork adding
+  a thin `src/` layer for RGB+thermal fusion. The actual technique is
+  simple early fusion — each dataset's own download script (KAIST, LLVIP,
+  M3FD, NII-CU) resizes thermal to match RGB's pixel size, stacks it as a
+  4th channel, and saves a merged TIFF; the only upstream `ultralytics`
+  patch is `ch: 4` in the model yaml (a channel-count override
+  `parse_model`/`DetectionModel` already supports natively) and
+  `cv2.imread(f, cv2.IMREAD_UNCHANGED)` so the loader keeps the 4th
+  channel. **Initial read was that this was an unpublished/unvalidated
+  personal project** (hardcoded personal paths throughout, generic
+  unmodified README, no paper found via search) — that assessment was
+  wrong.
+- **Correction**: there is a real paper — Balla & Shrestha, "Multispectral
+  Human Presence Detection using Adapted YOLO Network," EUSIPCO 2025
+  (OsloMet). Read the full PDF (user supplied it directly, IEEE Xplore
+  blocks scraping). It's a much closer match to this thesis than VTSaR:
+  explicitly framed around SAR drone human detection with tiny objects at
+  altitude. Method: (1) widen YOLOv8's first conv from a 3x3x3 to a 3x3xn
+  kernel for n-channel input (their n=4: RGB+thermal), (2) replace the
+  neck's nearest-neighbor upsampling with bicubic for better small-object
+  detail. Evaluated on **NII-CU** (Speth et al. 2022, *Journal of Field
+  Robotics* — a real, citable, published UAV RGB+thermal dataset, not just
+  a random zip) and **M3FD**. Results: baseline (RGB-only YOLOv8,
+  COCO-pretrained) mAP50-95 = 0.448 → +4-channel fusion = 0.667 (+22%) →
+  +bicubic = 0.675, with the 4-channel fusion itself costing essentially no
+  latency (59→59 FPS) and bicubic costing ~2.4ms (59→52 FPS). On M3FD, beat
+  YOLO-MS (a dual-backbone multispectral competitor) by 10% mAP50-95 (0.656
+  vs. 0.552) despite a single, simpler backbone.
+- **Scope decision** (asked the user): reimplement the architecture against
+  our own `BaseDetector` interface and run it on our own TRGB/WiSARD data
+  only — no NII-CU/M3FD acquisition for now, so no reproduction check
+  against the paper's own numbers yet. Tradeoff accepted knowingly: their
+  method assumes RGB/thermal are already reasonably aligned once resized to
+  the same size (true for KAIST/LLVIP/M3FD/NII-CU, all captured with
+  co-located/beam-splitter rigs) — **not true for TRGB/WiSARD** (2026-09-06
+  finding). This makes `ms_yolov8` a deliberately-included *weak* baseline
+  on our data: if it underperforms specifically because of misalignment,
+  that's a legitimate, citable result supporting the mid-fusion choice used
+  elsewhere in this repo, not a failed reimplementation.
+- Implemented as `ms_yolov8`
+  (`src/binarized_cv/models/detectors/ms_yolov8.py`), reusing the same
+  `ultralytics.nn.tasks.DetectionModel` wrapping pattern as `yolo26.py`.
+  Two things had to be re-verified empirically rather than assumed, since
+  stock YOLOv8 differs from YOLO26 here:
+  - No custom yaml needed for the 4-channel input — `DetectionModel(cfg=
+    "yolov8n.yaml", ch=4, ...)` widens the first conv directly via the same
+    `ch` kwarg mechanism YOLO26 uses, confirmed empirically
+    (`model.model[0].conv.in_channels == 4`).
+  - Stock YOLOv8's `Detect` head is **not** NMS-free like YOLO26's
+    (`end2end=False`, real `reg_max=16` DFL) — eval-mode output is raw
+    undecoded-by-NMS `(B, 4+nc, num_anchors)`, needing an explicit
+    `ultralytics.utils.nms.non_max_suppression()` call (function moved out
+    of `ultralytics.utils.ops` in this version) to get final per-image
+    detections, unlike YOLO26 where postprocessing is already done inside
+    the model's forward.
+  - The bicubic upsample change needs no custom yaml either — found the
+    `nn.Upsample` modules directly in the parsed `model.model` and set
+    `.mode = "bicubic"` post-construction; verified the patched model still
+    runs forward/backward correctly.
+  - Extracted `targets_to_ultralytics_batch`/`clamp_xyxy_to_image` into a
+    shared `detectors/_ultralytics_common.py` used by both `yolo26.py` and
+    `ms_yolov8.py`, since the batch-conversion and box-clamping logic is
+    identical across any ultralytics-backed detector.
+- Verified end-to-end (train → checkpoint → eval) through the same
+  unmodified `train.py`/`evaluate.py` CLI as the other two models, just
+  `model=ms_yolov8` — three architecturally distinct models now share the
+  exact same data/training/eval code. 48 tests total (6 new for
+  `ms_yolov8`), ruff clean.

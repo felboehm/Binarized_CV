@@ -13,6 +13,7 @@ dependencies = [
     "hydra-core",
     "tqdm",
     "tensorboard",
+    "ultralytics>=8.4",
 ]
 
 [project.optional-dependencies]

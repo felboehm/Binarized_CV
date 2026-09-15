@@ -1,0 +1,6 @@
+raw_root: data/raw
+manifest_path: data/processed/manifest.jsonl
+img_size: [640, 640]
+target_modality: rgb
+batch_size: 8
+num_workers: 4

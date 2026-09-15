@@ -1,0 +1,6 @@
+name: ms_yolov8
+num_classes: 1
+img_size: [640, 640]
+scale: n
+conf_thresh: 0.25
+iou_thresh: 0.45

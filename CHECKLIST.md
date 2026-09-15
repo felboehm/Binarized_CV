@@ -32,7 +32,20 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       detector method is a candidate to reimplement on our own data;
       otherwise a strong single-modality baseline (YOLO26 fp32, a
       pruned/distilled variant, another binarized detector) run on the same
-      fused input — must be reproducible with available code/weights
+      fused input — must be reproducible with available code/weights.
+      **First candidate implemented**: Balla & Shrestha, "Multispectral
+      Human Presence Detection using Adapted YOLO Network" (EUSIPCO 2025,
+      OsloMet) — arguably a closer match than VTSaR: SAR-drone human
+      detection, RGB+thermal early fusion (4-channel YOLOv8) + bicubic
+      neck upsampling for small objects, code public
+      (github.com/frnc96/ms-yolov8, AGPL-3.0, fork of ultralytics).
+      Reimplemented as `ms_yolov8`
+      (`src/binarized_cv/models/detectors/ms_yolov8.py`) against our own
+      `BaseDetector` interface rather than depending on their fork
+      directly — see `docs/labnotes.md` 2026-09-07 for the full writeup,
+      including why this is a deliberately weak baseline on TRGB/WiSARD
+      specifically (their method assumes spatial alignment our data
+      doesn't have).
 - [ ] Write thesis proposal / research plan, get advisor sign-off
 
 ## 2. Environment & Repo Setup
@@ -148,12 +161,43 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       per-modality feature extraction merged via a learned module (e.g.
       cross-attention, as in CFT/ICAFusion); (b) is likely lower-risk given
       no ground-truth camera calibration/homography is provided by either
-      dataset
-- [ ] Extend YOLO26 input stem/backbone for the chosen fusion point and
-      4-6 channel (RGB+IR) input
-- [ ] Get the extended YOLO26 reference implementation running end-to-end
-      (train + eval) on the chosen multispectral dataset at full precision —
-      this is your accuracy/speed/power upper bound
+      dataset. **Still open** — a mid-fusion (b)-style placeholder (plain
+      channel-concat of independently-extracted features, not a learned
+      cross-attention module) now exists to unblock the pipeline (see
+      below), but the real CFT/ICAFusion-style fusion decision is unmade.
+- [x] Plug-and-play model system built so any model (binarized backbone, a
+      different fusion module, a reimplemented comparison model) drops in
+      without touching data loading or the training/eval loop:
+      `BaseDetector` interface (`src/binarized_cv/models/base.py`) +
+      `MODEL_REGISTRY`/`build_model` (`registry.py`) — a new model just
+      subclasses `BaseDetector` and adds `@register_model("name")`.
+      Contract mirrors torchvision's detection API: `forward(images,
+      targets=None)` returns a loss dict when training, a list of
+      `{"boxes", "scores", "labels"}` detections otherwise. Resolved the
+      RGB/IR-misalignment supervision question this forced: **RGB is the
+      primary/target modality** (losses + eval in RGB coordinate space, IR
+      is an auxiliary input only) — see `docs/labnotes.md` 2026-09-07.
+- [x] Real YOLO26 wired in as a registered model (`yolo26`,
+      `src/binarized_cv/models/detectors/yolo26.py`), **RGB-only so far** —
+      wraps `ultralytics.nn.tasks.DetectionModel` (the actual YOLO26n/s/m/l/x
+      CSP-Darknet backbone + PAN neck + NMS-free DFL-free dual head, not a
+      reimplementation) behind our `BaseDetector` interface. Chose to depend
+      on the real `ultralytics` package rather than reimplement, after
+      confirming with the user this means the repo's license terms follow
+      theirs (AGPL-3.0) as soon as this model is used — **see section 12,
+      still needs a final LICENSE-file decision**. Verified end-to-end
+      (train + eval, synthetic data) through the exact same `train.py`/
+      `evaluate.py` CLI as `simple_fusion`, no code changes needed to swap
+      models — proves the plug-and-play system actually works across a toy
+      model and a real production one. Details in `docs/labnotes.md`
+      2026-09-07 (YOLO26 section).
+- [ ] Extend YOLO26's input stem/backbone for the chosen fusion point and
+      multispectral (RGB+IR) input — **not started**; `yolo26` above is
+      RGB-only, IR is currently just ignored by this model
+- [ ] Reproduce or closely match published baseline metrics (from the TRGB
+      or WiSARD papers, or a reimplemented VTSaR-style method) before
+      touching binarization, so later deltas are trustworthy — needs a real
+      training run on the actual (not synthetic) dataset, not done yet
 - [ ] Reproduce or closely match published baseline metrics (from the TRGB
       or WiSARD papers, or a reimplemented VTSaR-style method) before
       touching binarization, so later deltas are trustworthy
@@ -243,5 +287,12 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
 ## 12. Repo Hygiene
 - [ ] `.gitignore` covers datasets, checkpoints, logs, wandb runs (partially
       present already — verify it's complete)
-- [ ] LICENSE decision (check university/advisor policy on thesis code)
+- [ ] LICENSE decision (check university/advisor policy on thesis code).
+      **Now partially forced**: the repo depends on `ultralytics` (for
+      YOLO26, see section 4), which is AGPL-3.0 — using their code/models
+      means either the whole repo is AGPL-3.0 licensed, or an Ultralytics
+      Enterprise license is obtained. No LICENSE file has been added yet
+      pending your/advisor confirmation — AGPL-3.0 is standard and fine for
+      a public academic thesis repo, but it's a repo-wide, hard-to-reverse
+      choice worth deciding deliberately rather than defaulting into.
 - [ ] `CITATION.cff` if the repo will be public and citable

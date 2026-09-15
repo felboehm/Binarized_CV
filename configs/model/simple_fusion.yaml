@@ -1,0 +1,5 @@
+name: simple_fusion
+num_classes: 1
+img_size: [640, 640]
+backbone_widths: [16, 32, 64, 128, 256]
+fusion_channels: 256
