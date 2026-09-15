@@ -3,10 +3,10 @@
 # already exist), train one model for a few epochs, then evaluate the
 # resulting checkpoint. This is a "does it actually work on real data"
 # quick-look run, not a real training recipe — defaults are deliberately
-# small (image size, epochs) so it finishes in reasonable time on a
-# CPU-only machine. Override anything via environment variables, e.g.:
+# small (image size, epochs) so it finishes in reasonable time.
+# Automatically uses CUDA if available; override via environment variables:
 #
-#   MODEL=ms_yolov8 EPOCHS=30 IMG_SIZE=640 DEVICE=cuda ./scripts/run_pipeline.sh
+#   MODEL=ms_yolov8 EPOCHS=30 IMG_SIZE=640 DEVICE=cpu ./scripts/run_pipeline.sh
 #
 # Assumes the project is installed in the active Python environment
 # (see README.md "Setup": pip install -e ".[dev]").
@@ -18,7 +18,14 @@ EPOCHS="${EPOCHS:-5}"
 IMG_SIZE="${IMG_SIZE:-320}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
-DEVICE="${DEVICE:-cpu}"
+# Auto-detect CUDA if not explicitly specified
+if [ -z "${DEVICE:-}" ]; then
+  if python -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    DEVICE="cuda"
+  else
+    DEVICE="cpu"
+  fi
+fi
 RAW_ROOT="${RAW_ROOT:-data/raw}"
 MANIFEST="${MANIFEST:-data/processed/manifest.jsonl}"
 RUN_NAME="${RUN_NAME:-${MODEL}_$(date +%Y%m%d_%H%M%S)}"

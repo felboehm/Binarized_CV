@@ -22,8 +22,8 @@ DATASETS = {
     "trgb": {
         "file_id": "1-d_0z-cx3gS_vBKKesW4Hr9P0T7J-ALf",
         "filename": "trgb_dataset.zip",
-        "extract_dir": "data/raw/trgb",
-        "check_path": "data/raw/trgb/trgb_dataset",
+        "extract_dir": "data/raw/trgb/trgb_dataset",
+        "check_path": "data/raw/trgb/trgb_dataset/train",
         "description": "TRGB (4,772 RGB+IR pairs)",
     },
     "wisard_full": {
@@ -64,12 +64,15 @@ def install_gdown() -> bool:
 
 
 def dataset_exists(check_path: str) -> bool:
-    """Check if dataset directory already exists and contains data."""
+    """Check if dataset directory already exists and contains real data (not just .gitkeep)."""
     path = Path(check_path)
     if not path.exists():
         return False
-    # Check if directory is non-empty
-    return any(path.iterdir())
+    # Check for actual files/dirs (ignore .gitkeep placeholders)
+    for item in path.iterdir():
+        if item.name != ".gitkeep":
+            return True
+    return False
 
 
 def download_from_gdrive(file_id: str, output_path: str, quiet: bool = False) -> bool:
@@ -104,6 +107,12 @@ def extract_zip(zip_path: str, extract_dir: str) -> bool:
         print(f"Extracting {zip_path} to {extract_dir}...")
         shutil.unpack_archive(zip_path, extract_dir)
         print(f"Extraction complete.")
+
+        # Clean up macOS metadata folder (safe to remove)
+        macosx_dir = extract_dir_obj / "__MACOSX"
+        if macosx_dir.exists():
+            shutil.rmtree(macosx_dir)
+            print(f"Removed macOS metadata folder (__MACOSX)")
 
         # Clean up zip file
         zip_path_obj.unlink()

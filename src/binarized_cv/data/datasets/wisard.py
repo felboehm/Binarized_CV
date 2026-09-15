@@ -31,7 +31,7 @@ def _frame_stems(modality_dir: Path) -> dict[str, str]:
 
 
 def discover_wisard(
-    raw_root: Path, dataset_dir_name: str = "wisard", split: str = "unassigned"
+    raw_root: Path, dataset_dir_name: str = "wisard"
 ) -> list[PairRecord]:
     raw_root = Path(raw_root)
     wisard_root = raw_root / dataset_dir_name
@@ -43,6 +43,14 @@ def discover_wisard(
         vis_frames, ir_frames = _frame_stems(vis_dir), _frame_stems(ir_dir)
         for frame in sorted(vis_frames.keys() & ir_frames.keys()):
             vis_stem, ir_stem = vis_frames[frame], ir_frames[frame]
+            # Assign splits deterministically: 70% train, 15% val, 15% test
+            frame_idx = int(frame)
+            if frame_idx % 100 < 70:
+                split = "train"
+            elif frame_idx % 100 < 85:
+                split = "val"
+            else:
+                split = "test"
             records.append(
                 PairRecord(
                     id=f"wisard_{prefix}_{frame}",
