@@ -14,7 +14,6 @@ babel==2.18.0
 beautifulsoup4==4.14.3
 -e git+https://github.com/felboehm/Binarized_CV.git@d9c8b9b6f1d0f9b4801757f8d159b85a8e9c0877#egg=binarized_cv
 bleach==6.3.0
-brevitas==0.12.0
 certifi==2026.2.25
 cffi==2.0.0
 charset-normalizer==3.4.7
@@ -37,6 +36,7 @@ fqdn==1.5.1
 fsspec==2026.3.0
 fvcore==0.1.5.post20221221
 grpcio==1.80.0
+gdown
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
