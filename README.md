@@ -104,12 +104,34 @@ python scripts/build_manifest.py --raw-root data/raw --out data/processed/manife
 
 ### 3. Train a model
 
+**Interactive mode (recommended for ease of use):**
+
 ```bash
-python -m binarized_cv.train.train model=yolo26
+python scripts/train_model.py
 ```
 
-`model=` selects a registered model by name (`configs/model/<name>.yaml`).
-Currently available:
+This prompts you to select a model and optionally configure training parameters
+(epochs, learning rate, batch size).
+
+**Or with direct arguments:**
+
+```bash
+python scripts/train_model.py --model yolo26 --epochs 20 --lr 0.0005
+python scripts/train_model.py --model ms_yolov8 --epochs 50 --batch-size 16
+python scripts/train_model.py --model yolo26 --epochs 10 --no-prompt  # skip prompts, use defaults
+```
+
+**Or with Hydra-style overrides (full control):**
+
+```bash
+python -m binarized_cv.train.train model=yolo26
+python -m binarized_cv.train.train \
+  model=ms_yolov8 \
+  train.epochs=50 train.lr=0.0005 train.device=cuda \
+  data.batch_size=16 data.img_size=[640,640]
+```
+
+**Available models** (`model=` or `--model`):
 
 | name            | what it is                                                                 |
 | --------------- | --------------------------------------------------------------------------- |
@@ -119,14 +141,7 @@ Currently available:
 
 Any field in `configs/{data,model,train,eval}/*.yaml` can be overridden on
 the command line with `key=value` (dotted for nested fields, `[a,b]` for
-lists) — this is Hydra's usual override syntax, e.g.:
-
-```bash
-python -m binarized_cv.train.train \
-  model=ms_yolov8 \
-  train.epochs=50 train.lr=0.0005 train.device=cuda \
-  data.batch_size=16 data.img_size=[640,640]
-```
+lists) — this is Hydra's usual override syntax.
 
 Checkpoints land in `runs/checkpoints/epoch_<N>.pt` (`train.checkpoint_dir`)
 and TensorBoard logs in `runs/tensorboard` (`train.log_dir`):

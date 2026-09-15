@@ -285,3 +285,63 @@ chapter later.
   `model=ms_yolov8` — three architecturally distinct models now share the
   exact same data/training/eval code. 48 tests total (6 new for
   `ms_yolov8`), ruff clean.
+
+## 2026-09-15 (data download automation + pipeline fixes)
+
+- **Data download automation**: Built `scripts/download_data.py` to automatically
+  fetch TRGB and WiSARD from Google Drive, with automatic extraction, cleanup
+  (including macOS `__MACOSX` folders), and skip-if-already-present checks.
+  Supports interactive prompts or command-line args (`--wisard full/sample`,
+  `--trgb-only`, `--no-prompt`). Auto-installs `gdown` if missing. Also created
+  bash wrapper `scripts/download_data.sh` for convenience.
+- **Dataset structure fix**: TRGB discovery code initially expected
+  `data/raw/trgb/trgb_dataset/{train,val,test}` but the zip extracts to
+  `data/raw/trgb/{train,val,test}` directly. Fixed discovery to match actual
+  structure (`raw_root/trgb/{train,val,test}`). Applied same fix to evaluate
+  the actual data layout rather than prescribing it. Updated download script's
+  `check_path` to verify presence of real data (ignoring `.gitkeep` placeholders).
+- **Manifest split assignment**: WiSARD discovery was hardcoding `split="unassigned"`
+  instead of assigning train/val/test splits. Added deterministic split
+  assignment (70% train, 15% val, 15% test based on frame index) so manifest
+  records can be properly filtered by split during training/eval. TRGB already
+  had pre-defined splits (train/val/test folders), no change needed there.
+- **Pipeline CUDA auto-detection**: `scripts/run_pipeline.sh` defaulted to
+  `DEVICE=cpu` "for CPU-only machines," forcing users to explicitly set
+  `DEVICE=cuda` to use the GPU. Changed to auto-detect CUDA availability via
+  `torch.cuda.is_available()` so the pipeline uses GPU by default when available,
+  without user intervention. Still allows override with `DEVICE=cpu` if needed.
+  Updated README usage section with new download step and device behavior.
+- **Dependencies**: Added `gdown` to `pyproject.toml` for automatic dataset
+  download support. Noted but deferred numpy version conflict with brevitas
+  0.12.0 (which caps at numpy<=1.26.4 vs. requested 2.4.4) — brevitas is not
+  used in the project, so conflict is safe to ignore for now.
+- **First end-to-end validation**: Successfully ran full pipeline on real TRGB
+  + WiSARD data with GPU: manifest build → train YOLO26 for 5 epochs → eval.
+  Confirmed pytorch training now properly detects and uses CUDA without
+  explicit device specification. 48 tests passing, ruff clean.
+
+## 2026-09-15 (training script UX)
+
+- **User-friendly training script**: Built `scripts/train_model.py` following
+  the same interactive + CLI-arg pattern as `download_data.py`. Addresses user
+  feedback that running `python -m binarized_cv.train.train model=yolo26` is
+  unwieldy and doesn't provide guided model/parameter selection.
+- **Three usage modes**:
+  1. Interactive (`python scripts/train_model.py`): prompts for model, then
+     optional epochs/lr/batch-size overrides with defaults.
+  2. CLI args (`python scripts/train_model.py --model yolo26 --epochs 10`):
+     familiar argparse-style flags for quick runs.
+  3. Hydra overrides (direct to the underlying module): full control via
+     `key=value` syntax for reproducible runs/ablations.
+- **Implementation**: Refactored away repetitive `if` statements via an
+  `OVERRIDE_MAPPING` dict (`arg_name → hydra_config_path`) + `getattr()` loop,
+  reducing ~15 individual conditionals to a single parameterized iteration.
+  Interactive params returned as `{"train.epochs": "20"}` are reconstructed
+  as Hydra overrides (`"train.epochs=20"`) before passing to the underlying
+  training module.
+- **Validation**: End-to-end tested with `ms_yolov8` model, 1 epoch on real
+  TRGB + WiSARD data, GPU-enabled. Produced checkpoints and TensorBoard logs
+  as expected, confirmed successful training completion via output message.
+- **Documentation**: Updated README section 3 to promote `scripts/train_model.py`
+  as the recommended entry point with examples for all three modes, alongside
+  direct Hydra invocation for power users. Added today's entry to labnotes.
