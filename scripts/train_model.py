@@ -18,7 +18,11 @@ from typing import Optional
 
 MODELS = {
     "yolo26": {
-        "description": "YOLOv8 nano model for multispectral input",
+        "description": "YOLO26 baseline (RGB-only)",
+        "pretrained": False,
+    },
+    "yolo26_midfusion": {
+        "description": "YOLO26 with multispectral fusion (placeholder for mid-fusion)",
         "pretrained": False,
     },
     "simple_fusion": {

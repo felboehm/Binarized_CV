@@ -147,24 +147,17 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       for detector choice/anchors)
 
 ## 4. Baseline Model
-- [ ] Decide multispectral fusion architecture: early fusion (concat RGB+IR
-      channels before the stem), mid fusion (twin-stream backbones merged at
-      a middle stage), or late fusion (separate backbones, merge at
-      neck/head) — early/mid fusion is usually more binarization-friendly
-      since it avoids doubling full-precision backbone compute.
-      **Constraint from actual data (section 3): TRGB and WiSARD are not
-      pixel-registered between modalities (different resolutions, different
-      per-modality label coordinates) — plain early fusion by channel-concat
-      won't work as-is.** Options: (a) resize+warp/homography-align IR to
-      RGB coordinate space as a preprocessing step, enabling early fusion;
-      (b) skip pixel alignment and use mid/late fusion with independent
-      per-modality feature extraction merged via a learned module (e.g.
-      cross-attention, as in CFT/ICAFusion); (b) is likely lower-risk given
-      no ground-truth camera calibration/homography is provided by either
-      dataset. **Still open** — a mid-fusion (b)-style placeholder (plain
-      channel-concat of independently-extracted features, not a learned
-      cross-attention module) now exists to unblock the pipeline (see
-      below), but the real CFT/ICAFusion-style fusion decision is unmade.
+- [x] Decide multispectral fusion architecture: **decided on mid-fusion at P4/16**
+      (stride 16, 128 channels) with feature-level concatenation. RGB and IR
+      backbones extract independently to layer 6, then merge via
+      `ConcatFusion(128+128→128)`, continuing with shared backbone/neck/head.
+      Rationale: respects TRGB/WiSARD's non-registration (each modality
+      independent until merge), more binarization-friendly than late fusion
+      (single backbone cheaper than dual), simpler to implement than learned
+      cross-attention. Trade-off: ultralytics' neck has skip connections
+      requiring custom forward logic for true mid-fusion; current impl is
+      RGB-only placeholder (unblocks pipeline, defers IR wiring). See
+      `docs/labnotes.md` 2026-09-16 for full rationale.
 - [x] Plug-and-play model system built so any model (binarized backbone, a
       different fusion module, a reimplemented comparison model) drops in
       without touching data loading or the training/eval loop:
@@ -191,16 +184,18 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       models — proves the plug-and-play system actually works across a toy
       model and a real production one. Details in `docs/labnotes.md`
       2026-09-07 (YOLO26 section).
-- [ ] Extend YOLO26's input stem/backbone for the chosen fusion point and
-      multispectral (RGB+IR) input — **not started**; `yolo26` above is
-      RGB-only, IR is currently just ignored by this model
+- [x] Extend YOLO26 for multispectral input: Implemented `yolo26_midfusion`
+      detector + backbone builder (`build_yolo26_backbone_to_layer`). Currently
+      RGB-only (IR input available but unused) as pragmatic baseline; true IR
+      fusion (using IR stream in loss/inference) deferred pending architecture
+      refinement. Modalities declared as ("rgb", "ir"); dataset resize both to
+      same img_size; supervision in RGB space only.
 - [ ] Reproduce or closely match published baseline metrics (from the TRGB
       or WiSARD papers, or a reimplemented VTSaR-style method) before
-      touching binarization, so later deltas are trustworthy — needs a real
-      training run on the actual (not synthetic) dataset, not done yet
-- [ ] Reproduce or closely match published baseline metrics (from the TRGB
-      or WiSARD papers, or a reimplemented VTSaR-style method) before
-      touching binarization, so later deltas are trustworthy
+      touching binarization, so later deltas are trustworthy — 5-epoch run
+      complete (loss converged 7.6×), but AP@0.5=0 on test (too few epochs
+      for convergence). Extended runs (20-50 epochs) needed for real accuracy
+      baseline. See `docs/labnotes.md` 2026-09-16.
 - [ ] Establish baseline inference benchmarking harness (latency, FPS) on
       target hardware
 

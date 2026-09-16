@@ -1,0 +1,6 @@
+name: yolo26_midfusion
+num_classes: 1
+img_size: [640, 640]
+scale: n
+pretrained: false
+conf_thresh: 0.25

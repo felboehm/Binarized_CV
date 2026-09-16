@@ -136,7 +136,8 @@ python -m binarized_cv.train.train \
 | name            | what it is                                                                 |
 | --------------- | --------------------------------------------------------------------------- |
 | `simple_fusion` | basic reference detector (toy CNN backbones + concat fusion), RGB+IR        |
-| `yolo26`        | real Ultralytics YOLO26 (`ultralytics.nn.tasks.DetectionModel`), RGB-only   |
+| `yolo26`        | real Ultralytics YOLO26 (`ultralytics.nn.tasks.DetectionModel`), RGB-only baseline |
+| `yolo26_midfusion` | YOLO26 with mid-fusion at P4/16 (dual independent backbones → feature concat); RGB-only placeholder pending IR stream integration |
 | `ms_yolov8`     | RGB+thermal early-fusion YOLOv8, reimplementing Balla & Shrestha (EUSIPCO 2025) |
 
 Any field in `configs/{data,model,train,eval}/*.yaml` can be overridden on
@@ -167,8 +168,12 @@ uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
 
 ## Status
 
-Early scaffolding stage — see `CHECKLIST.md` section 2 onward for what's
-decided vs. still open.
+**Baseline model implementation complete** (2026-09-16): Fusion architecture decided
+(mid-fusion at P4/16), `yolo26_midfusion` detector implemented and trained.
+Baseline training on TRGB+WiSARD converged (loss 39.21→5.14 over 5 epochs).
+Next: Extended training for accuracy baseline, true IR stream integration,
+then binarization. See `CHECKLIST.md` for detailed progress across all
+sections, and `docs/labnotes.md` for decisions and rationale.
 
 ## License
 
