@@ -185,11 +185,15 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       model and a real production one. Details in `docs/labnotes.md`
       2026-09-07 (YOLO26 section).
 - [x] Extend YOLO26 for multispectral input: Implemented `yolo26_midfusion`
-      detector + backbone builder (`build_yolo26_backbone_to_layer`). Currently
-      RGB-only (IR input available but unused) as pragmatic baseline; true IR
-      fusion (using IR stream in loss/inference) deferred pending architecture
-      refinement. Modalities declared as ("rgb", "ir"); dataset resize both to
-      same img_size; supervision in RGB space only.
+      detector. Both RGB (3-ch) and IR (1-ch) models built, ConcatFusion modules
+      ready. **Fusion wiring decision pending** (2026-09-19): determined that
+      simple P4/16-only injection doesn't work due to YOLO26's skip connections
+      in the neck (which reference specific earlier layers by index). Three paths
+      forward identified (see labnotes 2026-09-19):
+      1. Early fusion (4-channel concat) — simplest, weak on misaligned data
+      2. Multi-scale mid-fusion (P3/P4/P5 fused) — architecturally clean, complex
+      3. Late fusion (P5/32) — avoids skip connections, efficiency trade-off
+      Architecture choice deferred to keep options open; all prerequisites ready.
 - [ ] Reproduce or closely match published baseline metrics (from the TRGB
       or WiSARD papers, or a reimplemented VTSaR-style method) before
       touching binarization, so later deltas are trustworthy — 5-epoch run

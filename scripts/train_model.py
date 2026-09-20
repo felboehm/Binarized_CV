@@ -21,8 +21,12 @@ MODELS = {
         "description": "YOLO26 baseline (RGB-only)",
         "pretrained": False,
     },
+    "yolo26_early_fusion": {
+        "description": "YOLO26 early fusion (4-channel concat, RGB+IR)",
+        "pretrained": False,
+    },
     "yolo26_midfusion": {
-        "description": "YOLO26 with multispectral fusion (placeholder for mid-fusion)",
+        "description": "YOLO26 with mid-fusion (architecture decision pending)",
         "pretrained": False,
     },
     "simple_fusion": {
@@ -56,20 +60,23 @@ def check_manifest_exists() -> bool:
 
 def prompt_model_selection() -> str:
     """Prompt user to choose a model."""
+    model_list = list(MODELS.keys())
     print("\nWhich model would you like to train?")
-    for i, (name, info) in enumerate(MODELS.items(), 1):
+    for i, name in enumerate(model_list, 1):
+        info = MODELS[name]
         print(f"  {i}) {name:20} - {info['description']}")
 
+    max_choice = len(model_list)
     while True:
-        choice = input("Enter choice (1-3): ").strip()
-        if choice == "1":
-            return "yolo26"
-        elif choice == "2":
-            return "simple_fusion"
-        elif choice == "3":
-            return "ms_yolov8"
-        else:
-            print("Invalid choice. Please enter 1, 2, or 3.")
+        choice = input(f"Enter choice (1-{max_choice}): ").strip()
+        try:
+            choice_idx = int(choice) - 1
+            if 0 <= choice_idx < len(model_list):
+                return model_list[choice_idx]
+            else:
+                print(f"Invalid choice. Please enter a number between 1 and {max_choice}.")
+        except ValueError:
+            print(f"Invalid input. Please enter a number between 1 and {max_choice}.")
 
 
 def prompt_training_params() -> dict:
@@ -160,7 +167,7 @@ Examples:
         "--model",
         "-m",
         choices=list(MODELS.keys()),
-        help="Model to train (yolo26, simple_fusion, ms_yolov8)",
+        help=f"Model to train: {', '.join(MODELS.keys())}",
     )
     parser.add_argument(
         "--epochs",
@@ -246,7 +253,7 @@ Examples:
         interactive_params = {}
 
     # Build final hydra overrides
-    hydra_overrides = [f"model={model}"]
+    hydra_overrides = [f"model={model}", f"model.name={model}"]
 
     # Add overrides from command-line arguments
     for arg_name, config_path in OVERRIDE_MAPPING.items():
@@ -283,8 +290,8 @@ Examples:
             print("\n" + "=" * 70)
             print("✓ Training completed successfully!")
             print("\nNext steps:")
-            print("  1. Evaluate the model: python -m binarized_cv.eval model=yolo26")
-            print("  2. View results: tensorboard --logdir runs/tensorboard")
+            print(f"  1. Evaluate the model: python -m binarized_cv.eval model={model}")
+            print(f"  2. View results: tensorboard --logdir runs/tensorboard/{model}")
             print("=" * 70)
             return 0
         else:

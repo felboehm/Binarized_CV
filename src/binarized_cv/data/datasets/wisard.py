@@ -5,13 +5,21 @@ from pathlib import Path
 
 from binarized_cv.data.records import PairRecord
 
-_DIR_PATTERN = re.compile(r"^(?P<prefix>.+)_(?P<modality>VIS|IR)_(?P<seq>\d+)$")
+# Match both old format (_VIS_N, _IR_N) and new format (_FLIR_VIS_N, _FLIR_IR_N)
+_DIR_PATTERN = re.compile(
+    r"^(?P<prefix>.+?)_(?:FLIR_)?(?P<modality>VIS|IR)(?:_(?P<seq>\d+))?$"
+)
 _FRAME_PATTERN = re.compile(r"_(?P<frame>\d{8})\.jpe?g$", re.IGNORECASE)
 
 
 def _group_flight_dirs(wisard_root: Path) -> dict[str, dict[str, Path]]:
+    """Group flight directories by prefix, handling both old and new naming conventions.
+
+    Old format: {prefix}_VIS_{seq} and {prefix}_IR_{seq}
+    New format: {prefix}_FLIR_VIS_{seq} and {prefix}_FLIR_IR_{seq}
+    """
     groups: dict[str, dict[str, Path]] = {}
-    for entry in sorted(p for p in wisard_root.rglob("*") if p.is_dir()):
+    for entry in sorted(p for p in wisard_root.iterdir() if p.is_dir() and not p.name.startswith(".")):
         match = _DIR_PATTERN.match(entry.name)
         if not match:
             continue
@@ -22,8 +30,12 @@ def _group_flight_dirs(wisard_root: Path) -> dict[str, dict[str, Path]]:
 
 
 def _frame_stems(modality_dir: Path) -> dict[str, str]:
+    """Extract frame numbers and stems from image files in a modality directory.
+
+    Supports both .jpg and .jpeg extensions.
+    """
     frames: dict[str, str] = {}
-    for p in modality_dir.glob("*.jpeg"):
+    for p in modality_dir.glob("*.jpg") + modality_dir.glob("*.jpeg"):
         match = _FRAME_PATTERN.search(p.name)
         if match:
             frames[match.group("frame")] = p.stem

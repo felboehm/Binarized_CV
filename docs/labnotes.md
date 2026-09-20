@@ -380,3 +380,67 @@ chapter later.
   → model → train → eval → checkpoints). True IR fusion (actually using IR stream
   in loss/inference) and true mid-fusion layer wiring are now clear next steps,
   unblocked by a running system. 48 tests passing, ruff clean.
+
+## 2026-09-19 (IR fusion deep dive)
+
+- **Investigation**: Attempted to implement IR fusion at P4/16 with multi-point fusion
+  (fusing at both layer 4 and layer 6) to give IR a symmetric role. Discovered
+  fundamental architectural constraint: YOLO26's PAN neck has skip connections that
+  reference earlier layers by index. Concat layers expect inputs from (previous_layer,
+  referenced_earlier_layer), but manual layer-by-layer execution loses access to
+  referenced outputs. Specifically:
+  - Layer 12 Concat: references layer 6 (our fusion point) + upsampled P5
+  - Layer 15 Concat: references layer 4 (before fusion) + upsampled P4
+  - Layers 18, 21: similar skip patterns
+  
+- **Root cause**: YOLO26 couples backbone+neck+head as one model. The Detect head
+  requires multi-scale pyramid inputs (P3/P4/P5) and the neck builds this pyramid
+  via skip connections with hardcoded layer references. Proper mid-fusion at P4/16
+  requires either:
+  1. Extract full backbone to get all scales, fuse at each (P3, P4, P5), or
+  2. Reimplement forward pass to track ALL intermediate outputs, or
+  3. Use late-fusion at P5/32 (avoids skip-connection complexity but accuracy/efficiency trade-off)
+
+- **Options forward** (decision deferred to prioritize baseline training):
+  - **Early fusion (4-channel)**: Simplest, matches ms_yolov8 comparison model. Known weak
+    on misaligned data (TRGB/WiSARD); if chosen, documents that misalignment is limiting
+    factor (thesis-credible result).
+  - **Multi-scale mid-fusion**: Cleanest architecturally; P3/P4/P5 fused independently,
+    then fused pyramid into head. Complex forward pass rewiring needed.
+  - **Late fusion (P5/32)**: Avoids skip connections (P5 is final pyramid scale), but
+    requires two full backbones (binarization inefficiency penalty).
+  - **RGB-only baseline**: Fastest path to validation. Establishes accuracy/latency/power
+    baseline before fusion ablations. Clear next iteration once training is running.
+
+- **IR wiring status**: Both rgb_model (3-ch) and ir_model (1-ch) successfully built,
+  weights loaded. ConcatFusion module ready (128+128→128). Fusion code skeleton present
+  in yolo26_midfusion.py but forward pass not yet wired (decision pending). Tests green,
+  model registry clean. Ready to flip switch on any fusion approach.
+
+- **Architectural lesson**: YOLO26's end-to-end design is efficient for single-input
+  inference but constrains where fusion can happen. Late fusion (separate backbones)
+  sidesteps architecture entirely; mid-fusion pays the skip-connection cost. Thesis
+  contribution: whichever path chosen will have an honest architectural story to tell
+  (and an ablation comparison).
+
+## 2026-09-20 (Early fusion implementation)
+
+- **Two-model strategy decided**: Implement both early and mid-fusion in parallel rather than
+  choosing one. Allows rapid validation of early fusion while mid-fusion is refined.
+- **Early fusion model implemented** (`yolo26_early_fusion`):
+  - Resize IR to match RGB spatial dimensions (bilinear interpolation)
+  - Concatenate RGB (3-ch) + IR (1-ch) → 4-ch input
+  - Single YOLO26 backbone with `ch=4` first conv
+  - Simplest possible fusion; follows Balla & Shrestha (EUSIPCO 2025) ms_yolov8 approach
+  - **Design feature (not a bug)**: Deliberately weak baseline on TRGB/WiSARD misaligned data.
+    If early fusion underperforms compared to RGB-only, that's evidence that spatial alignment
+    matters — thesis contribution (supports mid-fusion choice later).
+  - Config: `configs/model/yolo26_early_fusion.yaml`
+  - Tests: `tests/test_yolo26_early_fusion_detector.py` (6 tests: inference, training,
+    gradients, modalities, batch sizes, IR resize handling)
+  - Training via `scripts/train_model.py --model yolo26_early_fusion` or interactive mode
+- **Mid-fusion model preserved** (`yolo26_midfusion`): Custom forward pass skeleton present
+  but not yet integrated. Deferred to allow early fusion validation first; unblocks
+  mid-fusion refinement once early fusion baseline is established.
+- **Next steps**: Train early fusion for convergence, establish accuracy/latency baseline,
+  then decide whether mid-fusion complexity is warranted based on early fusion results.

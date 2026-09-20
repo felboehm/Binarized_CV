@@ -137,17 +137,22 @@ python -m binarized_cv.train.train \
 | --------------- | --------------------------------------------------------------------------- |
 | `simple_fusion` | basic reference detector (toy CNN backbones + concat fusion), RGB+IR        |
 | `yolo26`        | real Ultralytics YOLO26 (`ultralytics.nn.tasks.DetectionModel`), RGB-only baseline |
-| `yolo26_midfusion` | YOLO26 with mid-fusion at P4/16 (dual independent backbones → feature concat); RGB-only placeholder pending IR stream integration |
+| `yolo26_early_fusion` | YOLO26 early fusion: resize IR to RGB size, concatenate as 4-channel input, single backbone. Simplest approach; known weak on misaligned data (TRGB/WiSARD) but documents that constraint (legitimate thesis result). |
+| `yolo26_midfusion` | YOLO26 mid-fusion (architecture decision pending, see labnotes 2026-09-19). Both RGB and IR models built, ConcatFusion ready. Three fusion approaches identified (early/multi-scale-mid/late); reserved for future implementation. |
 | `ms_yolov8`     | RGB+thermal early-fusion YOLOv8, reimplementing Balla & Shrestha (EUSIPCO 2025) |
 
 Any field in `configs/{data,model,train,eval}/*.yaml` can be overridden on
 the command line with `key=value` (dotted for nested fields, `[a,b]` for
 lists) — this is Hydra's usual override syntax.
 
-Checkpoints land in `runs/checkpoints/epoch_<N>.pt` (`train.checkpoint_dir`)
-and TensorBoard logs in `runs/tensorboard` (`train.log_dir`):
+Checkpoints land in `runs/checkpoints/{model_name}/epoch_<N>.pt` and TensorBoard
+logs in `runs/tensorboard/{model_name}`, organized by model:
 
 ```bash
+# View logs for a specific model:
+tensorboard --logdir runs/tensorboard/yolo26_early_fusion
+
+# Or view all models' logs together:
 tensorboard --logdir runs/tensorboard
 ```
 
@@ -168,12 +173,15 @@ uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
 
 ## Status
 
-**Baseline model implementation complete** (2026-09-16): Fusion architecture decided
-(mid-fusion at P4/16), `yolo26_midfusion` detector implemented and trained.
-Baseline training on TRGB+WiSARD converged (loss 39.21→5.14 over 5 epochs).
-Next: Extended training for accuracy baseline, true IR stream integration,
-then binarization. See `CHECKLIST.md` for detailed progress across all
-sections, and `docs/labnotes.md` for decisions and rationale.
+**Baseline model infrastructure complete** (2026-09-16 → 2026-09-19): Fusion architecture
+decided (P4/16 mid-fusion), `yolo26_midfusion` detector scaffolded. Both RGB (3-ch) and
+IR (1-ch) models built and ready; ConcatFusion modules present. **Fusion wiring approach
+under review**: discovered that YOLO26's skip connections constrain where fusion can happen.
+Three options identified (early/multi-scale-mid/late fusion) with different accuracy/complexity
+trade-offs; decision deferred to prioritize getting baseline training running and validating
+results. 5-epoch convergence proof-of-concept complete (loss 39.21→5.14). Next: Choose
+fusion strategy, run extended training for accuracy baseline, then binarization.
+See `CHECKLIST.md` and `docs/labnotes.md` (2026-09-19) for full technical analysis.
 
 ## License
 

@@ -75,6 +75,77 @@ def dataset_exists(check_path: str) -> bool:
     return False
 
 
+def get_wisard_variant_present(wisard_dir: str = "data/raw/wisard") -> Optional[str]:
+    """
+    Detect which WiSARD variant is present by checking the metadata file.
+    Falls back to inferring from structure (sample has 1 flight, full has many).
+    Each flight has _VIS_XXXX and _IR_XXXX folders, so count unique flight base names.
+    Returns 'sample', 'full', or None if no variant is detected.
+    """
+    metadata_file = Path(wisard_dir) / ".wisard_variant"
+    if metadata_file.exists():
+        return metadata_file.read_text().strip()
+
+    # Fallback: infer from flight folders
+    # WiSARD has folders like "210417_MtErie_Enterprise_VIS_0003" and "210417_MtErie_Enterprise_IR_0004"
+    # Each flight generates 2 folders (VIS + IR), so count unique flight base names
+    wisard_path = Path(wisard_dir)
+    if wisard_path.exists():
+        flight_folders = [d for d in wisard_path.iterdir()
+                         if d.is_dir() and d.name not in [".gitkeep", "__MACOSX"]]
+        if flight_folders:
+            # Extract base flight name by removing _VIS_XXXX or _IR_XXXX suffix
+            flight_bases = set()
+            for folder in flight_folders:
+                name = folder.name
+                if "_VIS_" in name:
+                    base = name.rsplit("_VIS_", 1)[0]
+                    flight_bases.add(base)
+                elif "_IR_" in name:
+                    base = name.rsplit("_IR_", 1)[0]
+                    flight_bases.add(base)
+
+            if flight_bases:
+                # Sample has 1 flight, full has ~50+ flights
+                return "sample" if len(flight_bases) == 1 else "full"
+
+    return None
+
+
+def set_wisard_variant(variant: str, wisard_dir: str = "data/raw/wisard") -> None:
+    """Record which WiSARD variant was downloaded."""
+    wisard_path = Path(wisard_dir)
+    wisard_path.mkdir(parents=True, exist_ok=True)
+    metadata_file = wisard_path / ".wisard_variant"
+    metadata_file.write_text(variant)
+
+
+def delete_wisard_data(wisard_dir: str = "data/raw/wisard") -> bool:
+    """Delete WiSARD data but preserve .gitkeep."""
+    wisard_path = Path(wisard_dir)
+    if not wisard_path.exists():
+        return True
+
+    try:
+        for item in wisard_path.iterdir():
+            if item.name == ".gitkeep":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+
+        # Remove metadata file so next detection will be clean
+        metadata_file = wisard_path / ".wisard_variant"
+        if metadata_file.exists():
+            metadata_file.unlink()
+
+        return True
+    except Exception as e:
+        print(f"Error deleting WiSARD data: {e}")
+        return False
+
+
 def download_from_gdrive(file_id: str, output_path: str, quiet: bool = False) -> bool:
     """Download a file from Google Drive using gdown."""
     try:
@@ -136,8 +207,29 @@ def download_dataset(dataset_key: str) -> bool:
     description = dataset_info["description"]
     file_id = dataset_info["file_id"]
 
-    # Check if already exists
-    if dataset_exists(check_path):
+    # Special handling for WiSARD variants
+    if dataset_key.startswith("wisard_"):
+        variant_name = dataset_key.split("_")[1]  # "sample" or "full"
+        present_variant = get_wisard_variant_present(check_path)
+
+        if present_variant:
+            if present_variant == variant_name:
+                print(f"✓ {description} already exists at {check_path}")
+                return True
+            else:
+                print(f"Found WiSARD {present_variant} at {check_path}, but {variant_name} was requested.")
+                response = input(f"Delete {present_variant} and download {variant_name} instead? (y/n): ").strip().lower()
+                if response != 'y':
+                    print(f"Skipping {description}")
+                    return False
+
+                print(f"Deleting existing WiSARD {present_variant} data...")
+                if not delete_wisard_data(check_path):
+                    print(f"✗ Failed to delete existing WiSARD data")
+                    return False
+                print(f"Deleted WiSARD data (preserved .gitkeep)")
+    elif dataset_exists(check_path):
+        # Non-WiSARD datasets: simple existence check
         print(f"✓ {description} already exists at {check_path}")
         return True
 
@@ -153,6 +245,11 @@ def download_dataset(dataset_key: str) -> bool:
     if not extract_zip(filename, extract_dir):
         print(f"✗ Failed to extract {description}")
         return False
+
+    # Record which WiSARD variant was downloaded
+    if dataset_key.startswith("wisard_"):
+        variant_name = dataset_key.split("_")[1]
+        set_wisard_variant(variant_name, check_path)
 
     print(f"✓ Successfully downloaded and extracted {description}")
     return True
