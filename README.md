@@ -173,15 +173,22 @@ uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
 
 ## Status
 
-**Baseline model infrastructure complete** (2026-09-16 → 2026-09-19): Fusion architecture
-decided (P4/16 mid-fusion), `yolo26_midfusion` detector scaffolded. Both RGB (3-ch) and
-IR (1-ch) models built and ready; ConcatFusion modules present. **Fusion wiring approach
-under review**: discovered that YOLO26's skip connections constrain where fusion can happen.
-Three options identified (early/multi-scale-mid/late fusion) with different accuracy/complexity
-trade-offs; decision deferred to prioritize getting baseline training running and validating
-results. 5-epoch convergence proof-of-concept complete (loss 39.21→5.14). Next: Choose
-fusion strategy, run extended training for accuracy baseline, then binarization.
-See `CHECKLIST.md` and `docs/labnotes.md` (2026-09-19) for full technical analysis.
+**Early fusion model ready; manifest complete** (2026-09-16 → 2026-09-20):
+- **Data**: Full WiSARD dataset processed. Manifest contains **18,888 paired RGB/IR records**
+  (4,772 TRGB + 14,116 WiSARD = 96% of expected pairs). Airfield flight excluded due to
+  physical misalignment (VIS/IR from different camera angles).
+- **Models**: Three models ready for training:
+  - `yolo26`: RGB-only baseline (production YOLO26 from ultralytics)
+  - `yolo26_early_fusion`: Early fusion baseline (4-channel concat, RGB+IR)
+  - `yolo26_midfusion`: Mid-fusion scaffold (architecture decision pending; custom forward
+    pass skeleton in place for multi-scale fusion, but not yet integrated)
+  - `ms_yolov8`: Multispectral YOLOv8 comparison model (Balla & Shrestha EUSIPCO 2025)
+- **Training**: Full pipeline validated (data → train → eval → checkpoints). Organized by model
+  with timestamped runs (no overwrites). Early fusion 1-epoch run complete and working.
+  
+**Next**: Extended training for accuracy baseline (20-50 epochs on early fusion or yolo26),
+then binarization. Mid-fusion integration deferred pending baseline results.
+See `CHECKLIST.md` and `docs/labnotes.md` (2026-09-20) for full technical details.
 
 ## License
 

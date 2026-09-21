@@ -123,19 +123,16 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       manifest (`scripts/build_manifest.py` writes it to
       `data/processed/manifest.jsonl`); `dataset.py` has a
       `MultispectralPersonDataset` (PyTorch) that loads images + YOLO boxes
-      per pair. Verified against the real downloaded data: **4772 TRGB
+      per pair. Verified against the real downloaded data: **4,772 TRGB
       pairs** (matches the documented 4118/324/330 split exactly) and
-      **263 WiSARD pairs** (264 frames minus 1 unmatched). Along the way,
-      found and fixed a real bug: TRGB mixes bare-numeric and
-      modality-prefixed (`RGB_####`/`IR_####`) filenames *within the same
-      folder* — naive exact-stem matching silently dropped ~1737 pairs
-      (2729/4118 caught) until fixed to canonicalize both naming schemes to
-      the same id before pairing. 16 unit tests (`tests/test_labels.py`,
-      `test_trgb_discovery.py`, `test_wisard_discovery.py`,
-      `test_manifest.py`) cover both datasets' quirks with synthetic
-      fixtures, so they run without the (gitignored) real data present.
-      No augmentation/resizing/normalization yet — deferred to the training
-      pipeline once the fusion architecture is decided.
+      **14,116 WiSARD pairs** (full dataset, 96% coverage). Manifest builder
+      handles: (1) TRGB's mixed filename conventions (bare-numeric and
+      modality-prefixed), (2) WiSARD's multiple VIS/IR subdirectories per
+      flight with offset sequence numbers (pairs by sorted order), (3) both
+      5-digit and 8-digit frame numbers, (4) skips Airfield flight (VIS/IR
+      misaligned — captured from different camera angles). 16 unit tests
+      cover both datasets' quirks with synthetic fixtures. No augmentation/
+      resizing/normalization yet — deferred to the training pipeline.
 - [ ] Decide how TRGB and WiSARD are used relative to each other: combined
       training set, or one for training + one for cross-dataset
       generalization evaluation (the latter is often more useful for

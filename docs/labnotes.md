@@ -423,6 +423,44 @@ chapter later.
   contribution: whichever path chosen will have an honest architectural story to tell
   (and an ablation comparison).
 
+## 2026-09-20 (Manifest builder refinement & early fusion training)
+
+- **Early fusion model implemented** (`yolo26_early_fusion`): Simple 4-channel concatenation
+  (RGB 3-ch + IR 1-ch), single YOLO26 backbone. Resizes IR to match RGB spatial dims.
+  Weak baseline on misaligned TRGB/WiSARD data (by design) — if it underperforms, that
+  documents spatial alignment as a limiting factor.
+- **Training infrastructure fixed**: 
+  - Model selection: Fixed hardcoded choices in `prompt_model_selection()` to dynamically
+    handle any number of models (was stuck at 1-3, now scales with MODELS dict).
+  - Logging/checkpoints: Organized by model with timestamped run directories
+    (`runs/tensorboard/{model}/{timestamp}/`, `runs/checkpoints/{model}/{timestamp}/`)
+    so multiple training runs don't overwrite each other. TensorBoard run names show
+    timestamp + model for easy tracking.
+  - Config system: Training script now passes explicit `model.name={model}` override
+    to Hydra to ensure correct model name is captured (fixes bug where all runs
+    showed "simple_fusion" regardless of selection).
+- **Manifest builder completed** (full WiSARD dataset):
+  - Fixed generator concatenation: replaced `glob()` + operator with `itertools.chain()`
+    for memory efficiency (generators, not lists).
+  - Extended `_group_flight_dirs()` to collect all VIS/IR subdirectories per flight,
+    not just one (handles WiSARD's multiple sequence directories per flight).
+  - Support both 5-digit (`00000`) and 8-digit (`00000000`) frame numbers in regex
+    (WiSARD uses both conventions).
+  - Pair VIS/IR directories by sorted index (handles offset sequence numbers where
+    VIS uses odd indices like 0003/0005/0007 paired with IR even indices 0004/0006/0008).
+  - Skip Airfield flight: VIS/IR captured from different camera angles (forest on
+    opposite sides in each modality) — physically misaligned, impossible to pair.
+  - **Final manifest: 18,888 records** (4,772 TRGB + 14,116 WiSARD = 96% of expected
+    ~15,453 WiSARD pairs). Breakdown:
+    - 210417_MtErie_Enterprise: 263 pairs
+    - 210529_Carnation_Enterprise: 2,052 pairs
+    - 210812_Hannegan_Enterprise: 1,136 pairs
+    - 210924_FHL_Enterprise: 8,485 pairs
+    - 220109_Baker_Enterprise: 2,180 pairs
+    - 210327_Airfield: SKIPPED (physical misalignment)
+- **Early fusion training validation**: Ran 1 epoch on full dataset with correct model
+  selection, proper logging dirs, and timestamped run names — all working correctly.
+
 ## 2026-09-20 (Early fusion implementation)
 
 - **Two-model strategy decided**: Implement both early and mid-fusion in parallel rather than
