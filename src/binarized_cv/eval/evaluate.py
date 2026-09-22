@@ -21,6 +21,30 @@ def load_config(overrides: list[str] | None = None) -> DictConfig:
         return compose(config_name="config", overrides=overrides if overrides is not None else sys.argv[1:])
 
 
+def _convert_targets_to_xyxy_pixels(
+    targets: list[dict[str, torch.Tensor]], img_size: tuple[int, int]
+) -> list[dict[str, torch.Tensor]]:
+    """Convert targets from cxcywh normalized [0,1] to xyxy pixels [0, img_w/h]."""
+    img_w, img_h = img_size
+    converted = []
+    for target in targets:
+        boxes_cxcywh = target["boxes"]  # (N, 4) in [0, 1]
+        if boxes_cxcywh.shape[0] == 0:
+            converted.append(target)
+            continue
+
+        # cxcywh normalized to xyxy pixels
+        cx, cy, w, h = boxes_cxcywh[:, 0], boxes_cxcywh[:, 1], boxes_cxcywh[:, 2], boxes_cxcywh[:, 3]
+        x1 = (cx - w / 2) * img_w
+        y1 = (cy - h / 2) * img_h
+        x2 = (cx + w / 2) * img_w
+        y2 = (cy + h / 2) * img_h
+        boxes_xyxy = torch.stack([x1, y1, x2, y2], dim=1)
+
+        converted.append({**target, "boxes": boxes_xyxy})
+    return converted
+
+
 def main(cfg: DictConfig | None = None) -> None:
     if cfg is None:
         cfg = load_config()
@@ -47,6 +71,9 @@ def main(cfg: DictConfig | None = None) -> None:
             detections = model(images)
             all_predictions.extend({k: v.cpu() for k, v in d.items()} for d in detections)
             all_targets.extend(batch["targets"])
+
+    # Convert targets from cxcywh normalized to xyxy pixels to match predictions
+    all_targets = _convert_targets_to_xyxy_pixels(all_targets, tuple(cfg.data.img_size))
 
     ap = average_precision(all_predictions, all_targets, iou_threshold=0.5)
     print(f"AP@0.5: {ap:.4f}")

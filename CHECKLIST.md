@@ -227,10 +227,16 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       unstable — watch for this explicitly)
 
 ## 7. Accuracy Evaluation
-- [ ] Standard detection metrics: mAP@0.5, mAP@0.5:0.95, per-class AP,
-      precision/recall
-- [ ] Small-object performance breakdown (important for UAV/aerial imagery)
-- [ ] Qualitative results: sample detections, failure case gallery
+- [x] Standard detection metrics: AP@0.5, AP@0.75, AP@0.95
+- [x] Precision@0.5, Recall@0.5, F1@0.5 scores (@ IoU=0.5)
+- [x] Small-object performance breakdown by size category (small/medium/large)
+- [x] Precision-Recall curve visualization (shows accuracy vs recall trade-off)
+- [x] Qualitative results: 5 random test images with GT and predicted boxes
+- [x] Automated evaluation script with timestamped results
+      (`scripts/eval_with_visuals.py`)
+- [x] Comprehensive metrics & visualization suite saved to `runs/eval_results/`
+- [ ] Cross-dataset evaluation (TRGB vs WiSARD) for out-of-distribution robustness
+- [ ] Failure case gallery (systematic analysis of common miss patterns)
 
 ## 8. Efficiency Evaluation (the core thesis contribution)
 - [x] Target hardware decided: **CPU-class (Raspberry Pi / ARM Cortex-A, or

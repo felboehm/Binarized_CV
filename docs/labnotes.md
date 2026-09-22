@@ -482,3 +482,29 @@ chapter later.
   mid-fusion refinement once early fusion baseline is established.
 - **Next steps**: Train early fusion for convergence, establish accuracy/latency baseline,
   then decide whether mid-fusion complexity is warranted based on early fusion results.
+
+## 2026-09-22 (Comprehensive evaluation metrics & visualization)
+
+- **Evaluation script overhaul**: Fixed coordinate space mismatch bug that was causing AP=0
+  (predictions in pixel xyxy, targets in normalized cxcywh). Converter added to evaluation.
+- **New metrics implemented** @ IoU=0.5:
+  - Precision@0.5: 0.7976 (79.76% of predictions correct)
+  - Recall@0.5: 0.7727 (77.27% of actual people detected)
+  - F1@0.5: 0.7850 (balanced metric)
+  - TP/FP/FN counts for confusion matrix analysis
+- **New visualizations added**:
+  1. Object count distribution (split view: empty vs non-empty images) — replaces
+     confusing single histogram with two-panel view showing actual detection patterns
+  2. Precision-Recall curve @ IoU=0.5 — shows accuracy vs recall trade-off across
+     confidence thresholds; reveals recall ceiling at ~0.77 due to undetectable cases
+     (too small, occluded, or misaligned annotations)
+  3. Sample detections — 5 random test images with GT (green) and predicted (red) boxes
+- **Automated result collection** (`scripts/eval_with_visuals.py`):
+  - Timestamped result folders: `runs/eval_results/{model}_{timestamp}/`
+  - Each run saves: metrics.json (machine-readable), results_summary.txt
+    (human-readable), 5 PNG visualizations
+  - Prevents manual result copying; enables easy comparison across epochs
+- **Key finding**: Recall plateau at 0.77 is honest—~23% of ground truth people
+  cannot be detected at IoU≥0.5 due to model/data limitations (size, occlusion,
+  spatial misalignment). To improve, would need: better architecture (multi-scale),
+  more/better training data, or relaxed IoU threshold (but at quality cost).

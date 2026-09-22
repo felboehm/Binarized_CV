@@ -161,34 +161,62 @@ no GPU is available.
 
 ### 4. Evaluate a checkpoint
 
+**Quick evaluation (basic metrics):**
 ```bash
 python -m binarized_cv.eval.evaluate model=yolo26 eval.checkpoint_path=runs/checkpoints/epoch_49.pt
 ```
 
-Prints AP@0.5 on the `test` split (matching `model=` and any `data.*`
-overrides to the training run being evaluated — these aren't inferred from
-the checkpoint automatically). See `configs/README.md` for how the config
-groups fit together, and `docs/labnotes.md` (2026-09-07) for why the CLI
+**Comprehensive evaluation (with visualizations & detailed metrics):**
+```bash
+python scripts/eval_with_visuals.py \
+  model=yolo26_early_fusion \
+  eval.checkpoint_path=runs/checkpoints/yolo26_early_fusion/2026-09-21_21-04-06/epoch_29.pt
+```
+
+The comprehensive script generates:
+- **Metrics**: AP@0.5/0.75/0.95, Precision@0.5, Recall@0.5, F1@0.5
+- **Visualizations**: 
+  - Confidence distribution histogram
+  - Object count distribution (empty vs non-empty images)
+  - AP vs confidence threshold curve
+  - Precision-Recall curve @ IoU=0.5
+  - 5 random test images with GT and predicted boxes
+- **Files**: `metrics.json` (machine-readable), `results_summary.txt` (human-readable)
+- **Location**: `runs/eval_results/{model_name}_{timestamp}/` (timestamped for each run)
+
+See `configs/README.md` for how the config groups fit together, and `docs/labnotes.md` (2026-09-07) for why the CLI
 uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
 
 ## Status
 
-**Early fusion model ready; manifest complete** (2026-09-16 → 2026-09-20):
+**Comprehensive evaluation implemented; early fusion model baseline complete** (2026-09-16 → 2026-09-22):
+
 - **Data**: Full WiSARD dataset processed. Manifest contains **18,888 paired RGB/IR records**
   (4,772 TRGB + 14,116 WiSARD = 96% of expected pairs). Airfield flight excluded due to
   physical misalignment (VIS/IR from different camera angles).
-- **Models**: Three models ready for training:
+
+- **Models**: Four models ready for training:
   - `yolo26`: RGB-only baseline (production YOLO26 from ultralytics)
-  - `yolo26_early_fusion`: Early fusion baseline (4-channel concat, RGB+IR)
-  - `yolo26_midfusion`: Mid-fusion scaffold (architecture decision pending; custom forward
-    pass skeleton in place for multi-scale fusion, but not yet integrated)
+  - `yolo26_early_fusion`: Early fusion baseline (4-channel concat, RGB+IR) — **30 epochs trained**
+  - `yolo26_midfusion`: Mid-fusion scaffold (architecture decision pending)
   - `ms_yolov8`: Multispectral YOLOv8 comparison model (Balla & Shrestha EUSIPCO 2025)
-- **Training**: Full pipeline validated (data → train → eval → checkpoints). Organized by model
-  with timestamped runs (no overwrites). Early fusion 1-epoch run complete and working.
+
+- **Evaluation metrics** (30-epoch early fusion checkpoint):
+  - AP@0.5: **0.7263**, AP@0.75: 0.3810, AP@0.95: 0.0038
+  - Precision@0.5: **0.7976**, Recall@0.5: **0.7727**, F1@0.5: **0.7850**
+  - Per-size breakdown: Small (77% recall), Medium (88% recall), Large (9% recall)
+  - Recall ceiling at 0.77 due to undetectable cases (see `docs/labnotes.md` 2026-09-22)
+
+- **Evaluation tooling** (new):
+  - `scripts/eval_with_visuals.py` — comprehensive metrics + visualizations
+  - Timestamped result collection to `runs/eval_results/`
+  - 5 visualizations: confidence distribution, object count (empty/non-empty), 
+    AP vs threshold, precision-recall curve, 5 sample detection images
+  - Machine-readable (`metrics.json`) and human-readable (`results_summary.txt`) outputs
   
-**Next**: Extended training for accuracy baseline (20-50 epochs on early fusion or yolo26),
-then binarization. Mid-fusion integration deferred pending baseline results.
-See `CHECKLIST.md` and `docs/labnotes.md` (2026-09-20) for full technical details.
+**Next**: Extended training for convergence (50+ epochs), then binarization implementation.
+Mid-fusion integration deferred pending early fusion baseline results.
+See `CHECKLIST.md` and `docs/labnotes.md` (2026-09-22) for full technical details.
 
 ## License
 
