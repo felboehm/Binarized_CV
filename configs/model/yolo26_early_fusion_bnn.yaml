@@ -1,0 +1,27 @@
+# Binarized YOLO26 early fusion (RGB+IR, 4-channel). Same detector as
+# `yolo26_early_fusion`, with convs swapped per region — see
+# docs/binarization_plan.md and src/binarized_cv/models/binarized/policy.py.
+name: yolo26_early_fusion
+num_classes: 1
+img_size: [640, 640]
+scale: n
+pretrained: false
+# fp32 checkpoint of this same model (e.g. runs/checkpoints/yolo26_early_fusion/<ts>/epoch_N.pt)
+# to warm-start from — strongly recommended for BNN training.
+init_checkpoint: null
+binarization:
+  preset: ib_guided  # fp32 | ib_guided | full
+  # Per-region override of the preset: fp | binary | <bits>. null = preset value.
+  regions:
+    input_conv: null
+    stem: null
+    p3: null
+    backbone_deep: null
+    neck_deep: null
+    attention: null
+    head_one2one: null
+    head_out: null
+    head_one2many: null
+  stochastic: false
+  skip_depthwise: true
+  depthwise_fallback_bits: 8

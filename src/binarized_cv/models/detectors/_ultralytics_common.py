@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 import torch
+from torch import nn
+
+from binarized_cv.models.binarized import apply_binarization, format_region_stats
+
+log = logging.getLogger(__name__)
 
 
 def targets_to_ultralytics_batch(
@@ -36,3 +43,24 @@ def clamp_xyxy_to_image(boxes: torch.Tensor, img_size: tuple[int, int]) -> torch
     x2 = boxes[:, 2].clamp(0, img_w)
     y2 = boxes[:, 3].clamp(0, img_h)
     return torch.stack([x1, y1, x2, y2], dim=-1)
+
+
+def warm_start_and_binarize(
+    detector: nn.Module, binarization: dict | None, init_checkpoint: str | None
+) -> None:
+    """Optionally load one of our own fp32 training checkpoints into
+    `detector` (BNN warm start), then swap `detector.model`'s convs for
+    quantized ones per `binarization` (see
+    `binarized_cv.models.binarized.policy`). Order matters: latent binary
+    weights are initialised from whatever fp32 weights are loaded first.
+    No-op when both arguments are `None`."""
+    if init_checkpoint is not None:
+        state = torch.load(init_checkpoint, map_location="cpu", weights_only=True)
+        missing, unexpected = detector.load_state_dict(state, strict=False)
+        if missing:
+            raise RuntimeError(f"{init_checkpoint} is missing {len(missing)} keys, e.g. {missing[:3]}")
+        if unexpected:
+            log.warning("Ignoring %d unexpected keys in %s, e.g. %s", len(unexpected), init_checkpoint, unexpected[:3])
+    if binarization is not None:
+        stats = apply_binarization(detector.model, binarization)
+        log.info("Binarization (preset=%s):\n%s", binarization.get("preset"), format_region_stats(stats))

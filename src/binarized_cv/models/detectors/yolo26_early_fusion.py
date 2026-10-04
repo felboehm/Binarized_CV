@@ -9,6 +9,7 @@ from binarized_cv.models.base import BaseDetector
 from binarized_cv.models.detectors._ultralytics_common import (
     clamp_xyxy_to_image,
     targets_to_ultralytics_batch,
+    warm_start_and_binarize,
 )
 from binarized_cv.models.registry import register_model
 
@@ -50,6 +51,11 @@ class Yolo26EarlyFusionDetector(BaseDetector):
     assumption doesn't hold — makes this a deliberately weak baseline.
 
     Depends on `ultralytics` (AGPL-3.0) — see `LICENSE`.
+
+    `binarization` (a dict, see `binarized_cv.models.binarized.policy`)
+    swaps convs for binary/low-bit ones per YOLO26 region; `None` keeps the
+    plain fp32 model. `init_checkpoint` warm-starts from one of our own fp32
+    checkpoints before that swap.
     """
 
     modalities = ("rgb", "ir")
@@ -61,6 +67,8 @@ class Yolo26EarlyFusionDetector(BaseDetector):
         scale: str = "n",
         pretrained: bool = False,
         conf_thresh: float = 0.25,
+        binarization: dict | None = None,
+        init_checkpoint: str | None = None,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -77,6 +85,8 @@ class Yolo26EarlyFusionDetector(BaseDetector):
                 self.model.load(checkpoint)
             except Exception as e:
                 print(f"Warning: Could not load pretrained weights: {e}")
+
+        warm_start_and_binarize(self, binarization, init_checkpoint)
 
     def forward(
         self,

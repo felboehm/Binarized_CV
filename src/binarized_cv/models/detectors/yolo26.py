@@ -8,6 +8,7 @@ from binarized_cv.models.base import BaseDetector
 from binarized_cv.models.detectors._ultralytics_common import (
     clamp_xyxy_to_image,
     targets_to_ultralytics_batch,
+    warm_start_and_binarize,
 )
 from binarized_cv.models.registry import register_model
 
@@ -41,6 +42,11 @@ class Yolo26Detector(BaseDetector):
 
     Depending on `ultralytics` means this repo's license terms follow
     theirs (AGPL-3.0) as soon as this model is used — see `LICENSE`.
+
+    `binarization` (a dict, see `binarized_cv.models.binarized.policy`)
+    swaps convs for binary/low-bit ones per YOLO26 region; `None` keeps the
+    plain fp32 model. `init_checkpoint` warm-starts from one of our own fp32
+    checkpoints before that swap.
     """
 
     modalities = ("rgb",)
@@ -52,6 +58,8 @@ class Yolo26Detector(BaseDetector):
         scale: str = "n",
         pretrained: bool = False,
         conf_thresh: float = 0.25,
+        binarization: dict | None = None,
+        init_checkpoint: str | None = None,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -62,6 +70,7 @@ class Yolo26Detector(BaseDetector):
         if pretrained:
             checkpoint = torch.load(f"yolo26{scale}.pt", map_location="cpu", weights_only=False)
             self.model.load(checkpoint)
+        warm_start_and_binarize(self, binarization, init_checkpoint)
 
     def forward(
         self,

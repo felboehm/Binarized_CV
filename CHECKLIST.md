@@ -25,9 +25,13 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       TRGB paper (Shin et al., IJCAS 2025) for their baseline
       methods/metrics — these are on our actual data, so more directly
       reproducible as baselines than VTSaR's
-- [ ] Identify which YOLO26 layers are binarization-resistant (first/last layer,
+- [x] Identify which YOLO26 layers are binarization-resistant (first/last layer,
       detection head, and now the modality-fusion layer) — decide a
-      full-vs-partial binarization strategy
+      full-vs-partial binarization strategy. **Rationale**:
+      `docs/binarization_plan.md` (IB/DPI argument + YOLO26 paper evidence),
+      implemented as the `ib_guided` preset. **Still to confirm
+      empirically** with `scripts/binarization_sweep.py` (per-region ΔAP/ΔAPS)
+      and `scripts/estimate_layer_mi.py` (per-layer I(X;T), I(T;Y))
 - [ ] Pick 2-4 SOTA comparison models — VTSaR's lightweight/distilled
       detector method is a candidate to reimplement on our own data;
       otherwise a strong single-modality baseline (YOLO26 fp32, a
@@ -49,17 +53,32 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
 - [ ] Write thesis proposal / research plan, get advisor sign-off
 
 ## 2. Environment & Repo Setup
-- [ ] Decide framework (PyTorch, given YOLO ecosystem) + BNN library
-      (Larq, BitTorch/BNext codebase, or custom STE-based binarized layers)
-- [ ] Pin Python/CUDA/cuDNN/PyTorch versions; set up `requirements.txt` or
-      `pyproject.toml` + lockfile
-- [ ] Repo structure: `src/`, `configs/`, `scripts/`, `data/` (gitignored),
-      `experiments/` or `runs/` (gitignored), `docs/`, `notebooks/`
-- [ ] Set up experiment tracking (Weights & Biases / MLflow / TensorBoard)
-- [ ] Set up reproducibility basics: seed control, deterministic flags, config
-      files per experiment (Hydra/YAML)
-- [ ] Decide compute resources: local GPU vs. university cluster vs. cloud;
-      confirm storage/quota for datasets and checkpoints
+- [x] Decide framework (PyTorch, given YOLO ecosystem) + BNN library
+      (Larq, BitTorch/BNext codebase, or custom STE-based binarized layers):
+      **PyTorch + custom STE-based layers** (`QuantConv2d` in
+      `src/binarized_cv/models/binarized/`), no external BNN library. A
+      deployment runtime with real bitwise kernels is a separate, still-open
+      choice (§10)
+- [x] Pin Python/CUDA/cuDNN/PyTorch versions: `requirements.txt` pins the
+      exact dependency closure of `pyproject.toml` (torch 2.11.0,
+      torchvision 0.26.0, ultralytics 8.4.41, hydra-core 1.3.6); torch's
+      CUDA wheels are left to pip so a CUDA 12 build can be swapped in
+      (regenerated 2026-10-03). `pyproject.toml` holds the loose ranges.
+      Caveat: everything ran on Python 3.12, `pyproject.toml` still says
+      `>=3.10` (the pinned numpy/scipy need >= 3.11)
+- [x] Repo structure: `src/`, `configs/`, `scripts/`, `data/` (gitignored),
+      `runs/` (gitignored), `docs/`, `notebooks/`
+- [x] Set up experiment tracking: **TensorBoard** (`runs/tensorboard/{model}/
+      {timestamp}/`; loss, LR, grad norms), plus timestamped
+      `runs/eval_results/` and `runs/sweeps/` result files
+- [x] Set up reproducibility basics: seed control (`train.seed`, default 0,
+      also seeds the DataLoader shuffle), `train.deterministic` flag, Hydra
+      YAML configs per experiment. Runs before 2026-10-02 are unseeded
+- [ ] Decide compute resources: **Slurm cluster** (Ubuntu 22.04; `a40q`
+      4× A40, `a100q` 2×2 A100, 14-day limit; driver 615), set up
+      2026-10-03: `scripts/slurm/` + README §6. Not yet run there. Still
+      open: shared storage location/quota for the 42 GB dataset. Local
+      RTX 2050 stays for development (~10–13.5 min/epoch)
 - [ ] Set up CI or at minimum a lint/test pre-commit hook
 
 ## 3. Data
@@ -144,17 +163,27 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       for detector choice/anchors)
 
 ## 4. Baseline Model
-- [x] Decide multispectral fusion architecture: **decided on mid-fusion at P4/16**
-      (stride 16, 128 channels) with feature-level concatenation. RGB and IR
-      backbones extract independently to layer 6, then merge via
-      `ConcatFusion(128+128→128)`, continuing with shared backbone/neck/head.
-      Rationale: respects TRGB/WiSARD's non-registration (each modality
-      independent until merge), more binarization-friendly than late fusion
-      (single backbone cheaper than dual), simpler to implement than learned
-      cross-attention. Trade-off: ultralytics' neck has skip connections
-      requiring custom forward logic for true mid-fusion; current impl is
-      RGB-only placeholder (unblocks pipeline, defers IR wiring). See
-      `docs/labnotes.md` 2026-09-16 for full rationale.
+- [x] Decide multispectral fusion architecture: **several models, one per
+      fusion point**, compared against each other (and binarized the same
+      way) rather than a single chosen architecture:
+  - [x] **Early fusion** (`yolo26_early_fusion`): IR resized to RGB size,
+        4-channel input, single YOLO26. Implemented and trained (30 epochs:
+        AP50 0.726 test / 0.673 val); the current fp32 baseline and the
+        checkpoint all binarization sweeps start from. Expected to be limited
+        by the RGB/IR misregistration — a result, not a defect.
+  - [ ] **Mid fusion** (`yolo26_midfusion`): separate RGB and IR backbones,
+        merged at feature level via `ConcatFusion`, shared neck/head. RGB and
+        IR sub-models and the fusion module exist, but the forward pass is
+        still an **RGB-only placeholder**. Blocker: YOLO26's neck
+        concatenates earlier backbone outputs by layer index, so a single
+        P4/16 merge point doesn't work; needs either fusion at every scale the
+        neck reads (P3/P4/P5) or a custom forward that tracks all
+        intermediate outputs. Rationale for the P4 choice:
+        `docs/fusion_architecture_rationale.md`; constraint:
+        `docs/labnotes.md` 2026-09-19.
+  - RGB-only `yolo26` serves as the no-fusion reference (does IR help at
+    all on unregistered data?); late fusion stays an option for an ablation
+    but is not planned (two full backbones work against the efficiency goal).
 - [x] Plug-and-play model system built so any model (binarized backbone, a
       different fusion module, a reimplemented comparison model) drops in
       without touching data loading or the training/eval loop:
@@ -181,16 +210,11 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       models — proves the plug-and-play system actually works across a toy
       model and a real production one. Details in `docs/labnotes.md`
       2026-09-07 (YOLO26 section).
-- [x] Extend YOLO26 for multispectral input: Implemented `yolo26_midfusion`
-      detector. Both RGB (3-ch) and IR (1-ch) models built, ConcatFusion modules
-      ready. **Fusion wiring decision pending** (2026-09-19): determined that
-      simple P4/16-only injection doesn't work due to YOLO26's skip connections
-      in the neck (which reference specific earlier layers by index). Three paths
-      forward identified (see labnotes 2026-09-19):
-      1. Early fusion (4-channel concat) — simplest, weak on misaligned data
-      2. Multi-scale mid-fusion (P3/P4/P5 fused) — architecturally clean, complex
-      3. Late fusion (P5/32) — avoids skip connections, efficiency trade-off
-      Architecture choice deferred to keep options open; all prerequisites ready.
+- [ ] Extend YOLO26 for multispectral input: done for early fusion
+      (`yolo26_early_fusion`); mid fusion still to wire (see the item above).
+      Once wired, `yolo26_midfusion` also needs the `binarization` /
+      `init_checkpoint` kwargs that `yolo26` and `yolo26_early_fusion`
+      already take
 - [ ] Reproduce or closely match published baseline metrics (from the TRGB
       or WiSARD papers, or a reimplemented VTSaR-style method) before
       touching binarization, so later deltas are trustworthy — 5-epoch run
@@ -201,28 +225,57 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       target hardware
 
 ## 5. Binarization Implementation
-- [x] Binarization scope decided: **default to fully binarized** (backbone,
-      neck, and detection head), with a **config flag to keep the detection
-      head at full precision** as an ablation variant — lets you report both
-      the maximum-efficiency point and the accuracy-recovery point in the
-      same experiment matrix
-- [ ] Implement/import binary conv layers with a chosen weight+activation
-      binarization scheme and straight-through estimator for gradients
-- [ ] Integrate binarized layers into YOLO26 backbone, neck, and head, gated
-      by a per-block config flag (so head precision is a training-config
-      toggle, not a code fork)
-- [ ] Validate forward/backward pass numerically (unit tests, gradient checks)
-      before full training runs
+- [x] Binarization scope decided: **selective (mixed-precision) binarization,
+      not a fully binarized network.** The original plan (fully binarized
+      backbone + neck + head, fp head as ablation) is dropped: the per-region
+      sweep (`docs/binarization_findings.md`) shows binary P3 loses ~95% of
+      small-object AP, and the stem, input conv and head output projections
+      lose 0.17–0.25 AP50 each for ≤ 5% of the weights. Default is the
+      `ib_guided` region map: deep backbone + SPPF and deep neck binary, P3
+      path and one2one head 8-bit, stem/input conv/attention fp. The `full`
+      preset stays in the code only as a reference point for the sweep.
+      Still open: whether attention convs go binary in the default
+      (1.9 → 0.55 MiB for about −0.05 AP50)
+- [x] Implement/import binary conv layers with a chosen weight+activation
+      binarization scheme and straight-through estimator for gradients:
+      custom `QuantConv2d` (IR-Net balanced weights + XNOR scale, ReActNet
+      learnable activation threshold, IR-Net EDE surrogate gradient with
+      annealing, optional stochastic binarization, k-bit fake quant for
+      mixed precision). See `docs/labnotes.md` 2026-10-01
+- [x] Integrate binarized layers into YOLO26 backbone, neck, and head, gated
+      by config: 9 regions with presets (`fp32` / `ib_guided` / `full`) +
+      per-region overrides, e.g. `model.binarization.regions.head_one2one=fp`
+      for the fp-head ablation. Configs `yolo26_bnn`, `yolo26_early_fusion_bnn`
+- [x] Validate forward/backward pass numerically (unit tests, gradient checks)
+      before full training runs (`tests/test_binarized_layers.py`,
+      `tests/test_binarization_policy.py`)
+- [x] Run the per-region sensitivity sweep on a converged fp32 checkpoint
+      (post-training and with a few fine-tune epochs), tracking APS
+      specifically — done on the early fusion checkpoint with 3 fine-tune
+      epochs and an fp32 fine-tune control; P3 tested at 8/4/1 bit. Results:
+      `docs/binarization_findings.md`
+- [ ] Settle the remaining region-map questions: seeds for attention /
+      neck_deep / backbone_deep (~0.03 AP apart, within noise), stem at 8-bit,
+      and repeat the sweep on the mid-fusion model once it exists
+- [ ] Full-length `ib_guided` training (20 epochs, cosine): stopped run
+      resumed from `epoch_16.pt` on 2026-10-03; fp32 control and
+      `ib_guided` + binary attention on the same schedule queued after it
+      (`runs/bnn/queue_2026-10-03.sh`). Still to do: evaluate and write up
+- [ ] Knowledge distillation from the fp32 teacher (not implemented yet)
+- [ ] Ablations the plan calls for: stochastic vs deterministic binarization;
+      annealed vs fixed surrogate; adam vs sgd for binarized layers
 - [ ] Plan a training recipe for BNNs (they need different LR schedules,
       warm-start from pretrained fp32 weights, longer training, knowledge
       distillation from the fp32 teacher is common)
 
 ## 6. Training
-- [ ] Define experiment matrix: fp32 baseline, fully binarized, partially
-      binarized (ablation), with/without distillation
+- [ ] Define experiment matrix: {RGB-only, early fusion, mid fusion} ×
+      {fp32, `ib_guided`, `ib_guided` + binary attention}, with/without
+      distillation
 - [ ] Hyperparameter search plan (LR, batch size, distillation weight) —
       budget compute for this up front
-- [ ] Checkpointing + resumability for long runs
+- [x] Checkpointing + resumability for long runs: full state in `last.pt`
+      each epoch, `train.resume=<checkpoint>` (`docs/labnotes.md` 2026-10-03)
 - [ ] Logging: loss curves, mAP per epoch, gradient norms (BNN training is
       unstable — watch for this explicitly)
 

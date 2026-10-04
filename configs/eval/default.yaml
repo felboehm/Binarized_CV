@@ -1,1 +1,4 @@
 checkpoint_path: null
+# Upper box area (pixels², at model input size) for the small-object AP
+# (APS). 1024 = 32², the COCO definition the YOLO26 paper reports APS with.
+small_max_area: 1024

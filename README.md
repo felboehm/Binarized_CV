@@ -40,8 +40,13 @@ runs/                     Checkpoints, logs, experiment outputs (gitignored)
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements.txt   # pinned versions the experiments ran with (Python 3.12)
+pip install -e . --no-deps
 ```
+
+`pip install -e ".[dev]"` alone also works, with unpinned versions. The pinned
+torch wheel is the CUDA 13 build (NVIDIA driver >= 580). For an older driver,
+see the header of `requirements.txt` for installing the CUDA 12 build.
 
 ## Usage
 
@@ -138,7 +143,8 @@ python -m binarized_cv.train.train \
 | `simple_fusion` | basic reference detector (toy CNN backbones + concat fusion), RGB+IR        |
 | `yolo26`        | real Ultralytics YOLO26 (`ultralytics.nn.tasks.DetectionModel`), RGB-only baseline |
 | `yolo26_early_fusion` | YOLO26 early fusion: resize IR to RGB size, concatenate as 4-channel input, single backbone. Simplest approach; known weak on misaligned data (TRGB/WiSARD) but documents that constraint (legitimate thesis result). |
-| `yolo26_midfusion` | YOLO26 mid-fusion (architecture decision pending, see labnotes 2026-09-19). Both RGB and IR models built, ConcatFusion ready. Three fusion approaches identified (early/multi-scale-mid/late); reserved for future implementation. |
+| `yolo26_midfusion` | YOLO26 mid fusion: separate RGB and IR backbones merged at feature level (`ConcatFusion`), shared neck/head. **Work in progress**: forward pass is still RGB-only, because YOLO26's neck reads earlier backbone layers by index (see `docs/fusion_architecture_rationale.md`). |
+| `yolo26_bnn` / `yolo26_early_fusion_bnn` | Binarized (mixed-precision) variants of `yolo26` / `yolo26_early_fusion`, see [Binarization](#5-binarization). |
 | `ms_yolov8`     | RGB+thermal early-fusion YOLOv8, reimplementing Balla & Shrestha (EUSIPCO 2025) |
 
 Any field in `configs/{data,model,train,eval}/*.yaml` can be overridden on
@@ -184,39 +190,136 @@ The comprehensive script generates:
 - **Files**: `metrics.json` (machine-readable), `results_summary.txt` (human-readable)
 - **Location**: `runs/eval_results/{model_name}_{timestamp}/` (timestamped for each run)
 
+### 5. Binarization
+
+Binarized variants reuse the same detectors with a `binarization` block
+(`configs/model/yolo26_bnn.yaml`, `configs/model/yolo26_early_fusion_bnn.yaml`).
+The network is not fully binarized: the default `ib_guided` preset makes the
+deep backbone and deep neck binary, keeps the P3 (small-object) path and the
+one2one head at 8-bit, and leaves the stem, input conv and attention in full
+precision. The rationale is in `docs/binarization_plan.md`, the measurements
+behind it in `docs/binarization_findings.md`. The `full` preset is kept only as
+a reference point for the sweep. The implementation is in
+`src/binarized_cv/models/binarized/`.
+
+```bash
+# Warm-start a BNN from a trained fp32 checkpoint (IB-guided region map)
+python scripts/train_model.py --model yolo26_early_fusion_bnn --epochs 30 \
+  model.init_checkpoint=runs/checkpoints/yolo26_early_fusion/<ts>/epoch_29.pt
+
+# Per-region overrides / training knobs (here: also binarize the attention convs)
+python -m binarized_cv.train.train model=yolo26_early_fusion_bnn \
+  model.init_checkpoint=runs/checkpoints/yolo26_early_fusion/<ts>/epoch_29.pt \
+  model.binarization.regions.attention=binary \
+  train.scheduler=cosine train.warmup_epochs=1 train.seed=0
+  # model.binarization.stochastic=true train.optimizer=sgd train.grad_clip=10
+
+# Sensitivity sweep: binarize one region at a time, report ΔAP / ΔAPS on val
+python scripts/binarization_sweep.py --model yolo26_early_fusion_bnn \
+  --init-checkpoint runs/checkpoints/yolo26_early_fusion/<ts>/epoch_29.pt --epochs 0
+
+# Per-layer information-plane estimates I(X;T), I(T;Y)
+python scripts/estimate_layer_mi.py --model yolo26_early_fusion \
+  --checkpoint runs/checkpoints/yolo26_early_fusion/<ts>/epoch_29.pt
+```
+
+For queued or batch (e.g. Slurm) runs, `scripts/train_eval.py RUN_NAME OUT_JSON
+[overrides...]` trains, then evaluates on val and writes the metrics to
+`OUT_JSON`. A stopped run continues with `train.resume=<run dir>/last.pt`.
+
+The quantization is simulated in PyTorch. It measures accuracy, not speed.
+
 See `configs/README.md` for how the config groups fit together, and `docs/labnotes.md` (2026-09-07) for why the CLI
 uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
 
+### 6. Running on the Slurm cluster
+
+Scripts in `scripts/slurm/`. They're tuned for the cluster in use (Ubuntu 22.04,
+`a40q`: A40 nodes with driver 615, internet on compute nodes, local `/tmp`),
+but nothing in them is specific to it except the default partition.
+
+```bash
+# 1. Code + environment (login node). uv provides Python 3.12; the system
+#    python3 is 3.10 and the cluster's modules stop at 3.9.
+git clone <repo> && cd Binarized_CV
+bash scripts/slurm/setup_env.sh
+
+# 2. Data, manifest and the fp32 warm-start checkpoint (from the local machine;
+#    data/ and runs/ are gitignored). Put data/raw on the cluster's shared
+#    storage; the manifest's paths are relative to data.raw_root.
+rsync -a data/raw/ cluster:<shared>/bcv/raw/
+rsync -a data/processed/manifest.jsonl cluster:<repo>/data/processed/
+rsync -aR runs/checkpoints/yolo26_early_fusion/2026-09-21_21-04-06/epoch_29.pt cluster:<repo>/
+
+# 3. Submit from the repo root (Slurm resolves --output and the repo from there)
+export BCV_DATA=<shared>/bcv/raw
+sbatch -J ib_guided_attn scripts/slurm/job.sbatch scripts/train_eval.py \
+    yolo26_early_fusion_bnn_ib_guided_attn runs/bnn/ib_guided_attn_20ep_seed0.json \
+    model=yolo26_early_fusion_bnn \
+    model.init_checkpoint=runs/checkpoints/yolo26_early_fusion/2026-09-21_21-04-06/epoch_29.pt \
+    model.binarization.regions.attention=binary \
+    train.epochs=20 train.scheduler=cosine train.warmup_epochs=1 train.seed=0
+squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
+```
+
+`job.sbatch` runs any entry point that takes Hydra overrides (`train_eval.py`,
+`binarization_sweep.py`, `estimate_layer_mi.py`):
+
+- **Data staging:** it first copies `$BCV_DATA` to `/tmp/$USER/bcv-data/raw`
+  on the node, because reading ~120k JPEGs from shared storage would starve
+  the GPU. The copy persists, so later jobs on the same node only run
+  rsync's check. `BCV_STAGE=0` reads `$BCV_DATA` directly. Remove the copy
+  when done (`srun -p a40q -w <node> rm -rf /tmp/$USER/bcv-data`).
+- **Cluster defaults:** it sets `data.raw_root` and `data.num_workers`
+  (`--cpus-per-task` − 2) through `$BCV_OVERRIDES`. `load_config` reads that
+  variable *before* the command-line overrides, so anything passed explicitly
+  still wins.
+- **Job arrays:** `{task}` in the arguments becomes `$SLURM_ARRAY_TASK_ID`, for
+  seed or region arrays, e.g. `sbatch --array=0-2 … train.seed={task}`.
+- **Resources:** the defaults are `a40q`, 1 GPU, 16 CPUs, 64 GB, 1 day.
+  Override them on the `sbatch` command line (`-p a100q`, `-c 32`, `-t 3-00:00:00`).
+- **Logs:** progress bars update once a minute (`TQDM_MININTERVAL=60`) to keep
+  the logs readable.
+
 ## Status
 
-**Comprehensive evaluation implemented; early fusion model baseline complete** (2026-09-16 → 2026-09-22):
+As of 2026-10-02. Details in `CHECKLIST.md` and `docs/labnotes.md`.
 
-- **Data**: Full WiSARD dataset processed. Manifest contains **18,888 paired RGB/IR records**
-  (4,772 TRGB + 14,116 WiSARD = 96% of expected pairs). Airfield flight excluded due to
-  physical misalignment (VIS/IR from different camera angles).
+- **Data**: manifest of **18,888 paired RGB/IR records** (4,772 TRGB + 14,116
+  WiSARD). WiSARD's Airfield flight is excluded (VIS and IR shot from different
+  camera angles).
 
-- **Models**: Four models ready for training:
-  - `yolo26`: RGB-only baseline (production YOLO26 from ultralytics)
-  - `yolo26_early_fusion`: Early fusion baseline (4-channel concat, RGB+IR) — **30 epochs trained**
-  - `yolo26_midfusion`: Mid-fusion scaffold (architecture decision pending)
-  - `ms_yolov8`: Multispectral YOLOv8 comparison model (Balla & Shrestha EUSIPCO 2025)
+- **Fusion models**: the thesis compares several fusion architectures, each in
+  fp32 and binarized form:
+  - `yolo26_early_fusion` (4-channel input) — **trained, 30 epochs**. This is
+    the current baseline.
+  - `yolo26_midfusion` (feature-level fusion) — **in progress**, forward pass
+    still RGB-only.
+  - `yolo26` (RGB only) is the no-fusion reference, `ms_yolov8` (Balla &
+    Shrestha, EUSIPCO 2025) the first external comparison model.
 
-- **Evaluation metrics** (30-epoch early fusion checkpoint):
-  - AP@0.5: **0.7263**, AP@0.75: 0.3810, AP@0.95: 0.0038
-  - Precision@0.5: **0.7976**, Recall@0.5: **0.7727**, F1@0.5: **0.7850**
-  - Per-size breakdown: Small (77% recall), Medium (88% recall), Large (9% recall)
-  - Recall ceiling at 0.77 due to undetectable cases (see `docs/labnotes.md` 2026-09-22)
+- **Early fusion fp32 baseline** (30 epochs, `scripts/eval_with_visuals.py`, test
+  split): AP@0.5 **0.726**, AP@0.75 0.381, Precision@0.5 0.798, Recall@0.5
+  0.773. On the val split (`evaluate.py`): AP50 0.673, APS50 (< 32² px) 0.622.
 
-- **Evaluation tooling** (new):
-  - `scripts/eval_with_visuals.py` — comprehensive metrics + visualizations
-  - Timestamped result collection to `runs/eval_results/`
-  - 5 visualizations: confidence distribution, object count (empty/non-empty), 
-    AP vs threshold, precision-recall curve, 5 sample detection images
-  - Machine-readable (`metrics.json`) and human-readable (`results_summary.txt`) outputs
-  
-**Next**: Extended training for convergence (50+ epochs), then binarization implementation.
-Mid-fusion integration deferred pending early fusion baseline results.
-See `CHECKLIST.md` and `docs/labnotes.md` (2026-09-22) for full technical details.
+- **Binarization**: implemented (simulated in PyTorch) and partly tested on the
+  early fusion model. A one-region-at-a-time sweep with 3 fine-tune epochs (val)
+  shows:
+  - the deep backbone, deep neck and attention convs can go binary for
+    ≤ 0.08 AP50 each (~85% of conv weights);
+  - the P3 path must stay at 8-bit, since binary P3 loses ~95% of small-object AP;
+  - the stem, input conv and head output projections are poor trades.
+
+  A fully binarized network is therefore ruled out; the default is the selective
+  `ib_guided` map. See `docs/binarization_findings.md`.
+
+**Next**:
+1. Full-state checkpoints and resume.
+2. Finish the 20-epoch `ib_guided` run, plus an fp32 control on the same
+   schedule and an `ib_guided` + binary attention variant.
+3. Wire up the mid-fusion forward pass.
+4. A real-kernel latency benchmark on the target CPU; nothing here measures
+   speed yet.
 
 ## License
 

@@ -25,6 +25,14 @@ MODELS = {
         "description": "YOLO26 early fusion (4-channel concat, RGB+IR)",
         "pretrained": False,
     },
+    "yolo26_bnn": {
+        "description": "Binarized YOLO26 (RGB-only, IB-guided region map)",
+        "pretrained": False,
+    },
+    "yolo26_early_fusion_bnn": {
+        "description": "Binarized YOLO26 early fusion (IB-guided region map)",
+        "pretrained": False,
+    },
     "yolo26_midfusion": {
         "description": "YOLO26 with mid-fusion (architecture decision pending)",
         "pretrained": False,
@@ -49,6 +57,7 @@ OVERRIDE_MAPPING = {
     "log_dir": "train.log_dir",
     "checkpoint_dir": "train.checkpoint_dir",
     "device": "train.device",
+    "seed": "train.seed",
 }
 
 
@@ -211,6 +220,11 @@ Examples:
         help="Device to use for training",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        help="Random seed (default from config: 0)",
+    )
+    parser.add_argument(
         "--no-prompt",
         action="store_true",
         help="Skip interactive prompts and use defaults",
@@ -252,8 +266,11 @@ Examples:
     else:
         interactive_params = {}
 
-    # Build final hydra overrides
-    hydra_overrides = [f"model={model}", f"model.name={model}"]
+    # Build final hydra overrides. `model=` picks configs/model/<model>.yaml;
+    # its own `name:` field says which registered detector to build (several
+    # configs, e.g. yolo26 and yolo26_bnn, share one detector), and the
+    # training module names run directories after the config file.
+    hydra_overrides = [f"model={model}"]
 
     # Add overrides from command-line arguments
     for arg_name, config_path in OVERRIDE_MAPPING.items():

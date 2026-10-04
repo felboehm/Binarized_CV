@@ -1,6 +1,31 @@
 epochs: 10
 lr: 0.001
 weight_decay: 0.0001
+optimizer: adam  # adam | adamw | sgd — the plan asks to benchmark these for BNN layers
+momentum: 0.9  # sgd only
+# LR schedule, stepped per batch: none (constant lr) | cosine (linear warmup
+# over `warmup_epochs`, then cosine decay to lr * min_lr_ratio).
+scheduler: none
+warmup_epochs: 0
+min_lr_ratio: 0.01
+# Clip total grad norm (null = off). BNN training is unstable; the norm is
+# logged to TensorBoard either way.
+grad_clip: null
+# Progressive binarization: fraction of total steps over which the binary
+# layers' surrogate-gradient sharpness anneals from ede_t_min to ede_t_max
+# (IR-Net EDE). 0 keeps a fixed sharpness of 1. No effect on fp32 models.
+binarize_anneal_fraction: 0.5
+ede_t_min: 0.1
+ede_t_max: 10.0
+# Seeds Python/NumPy/torch and the shuffle order (null = unseeded). Same seed
+# -> same data order and init; GPU results still vary slightly unless
+# `deterministic` forces deterministic cuDNN kernels (slower).
+seed: 0
+deterministic: false
+# Continue a run: path to its last.pt (exact resume) or a weights-only
+# epoch_<N>.pt (fresh optimizer state). Training continues in that
+# checkpoint's run directory; keep the other settings as in the original run.
+resume: null
 device: cuda
 log_dir: runs/tensorboard
 checkpoint_dir: runs/checkpoints
