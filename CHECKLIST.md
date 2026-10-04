@@ -76,8 +76,9 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       YAML configs per experiment. Runs before 2026-10-02 are unseeded
 - [ ] Decide compute resources: **Slurm cluster** (Ubuntu 22.04; `a40q`
       4× A40, `a100q` 2×2 A100, 14-day limit; driver 615), set up
-      2026-10-03: `scripts/slurm/` + README §6. Not yet run there. Still
-      open: shared storage location/quota for the 42 GB dataset. Local
+      2026-10-03: `scripts/slurm/` + README §6. Not yet run there. Dataset
+      lives on the shared BeeGFS, `/global/D1/homes/$USER/bcv-data/raw`, and
+      is staged to node-local `/tmp` per job; code, venv and `runs/` in `~`. Local
       RTX 2050 stays for development (~10–13.5 min/epoch)
 - [ ] Set up CI or at minimum a lint/test pre-commit hook
 

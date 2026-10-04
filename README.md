@@ -245,14 +245,16 @@ git clone <repo> && cd Binarized_CV
 bash scripts/slurm/setup_env.sh
 
 # 2. Data, manifest and the fp32 warm-start checkpoint (from the local machine;
-#    data/ and runs/ are gitignored). Put data/raw on the cluster's shared
-#    storage; the manifest's paths are relative to data.raw_root.
-rsync -a data/raw/ cluster:<shared>/bcv/raw/
+#    data/ and runs/ are gitignored). The dataset goes on the shared BeeGFS
+#    (/global/D1, per-user dir under homes/); /work and /scratch are local
+#    disks of the login node. The manifest's paths are relative to
+#    data.raw_root.
+rsync -a data/raw/ cluster:/global/D1/homes/$USER/bcv-data/raw/
 rsync -a data/processed/manifest.jsonl cluster:<repo>/data/processed/
 rsync -aR runs/checkpoints/yolo26_early_fusion/2026-09-21_21-04-06/epoch_29.pt cluster:<repo>/
 
 # 3. Submit from the repo root (Slurm resolves --output and the repo from there)
-export BCV_DATA=<shared>/bcv/raw
+export BCV_DATA=/global/D1/homes/$USER/bcv-data/raw
 sbatch -J ib_guided_attn scripts/slurm/job.sbatch scripts/train_eval.py \
     yolo26_early_fusion_bnn_ib_guided_attn runs/bnn/ib_guided_attn_20ep_seed0.json \
     model=yolo26_early_fusion_bnn \

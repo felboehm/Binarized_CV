@@ -508,3 +508,364 @@ chapter later.
   cannot be detected at IoU≥0.5 due to model/data limitations (size, occlusion,
   spatial misalignment). To improve, would need: better architecture (multi-scale),
   more/better training data, or relaxed IoU threshold (but at quality cost).
+
+## 2026-10-01 (Binarization implemented, following docs/binarization_plan.md)
+
+- **Binarized layers** (`src/binarized_cv/models/binarized/`): one drop-in
+  `QuantConv2d(nn.Conv2d)` with independent weight/input precision — binary
+  (1), k-bit fake quant (2–16), or fp. Binary scheme, each piece chosen for a
+  specific reason:
+  - Weights: IR-Net balanced weights (centre + standardise per output channel
+    before `sign`, which maximises the entropy of the binary weights) times a
+    real per-channel XNOR-Net scale `alpha`. BN after the conv, biases and
+    `alpha` stay real-valued (plan: "scaling factors restore range").
+  - Inputs: `sign(x - tau)` with a learnable per-channel threshold (ReActNet
+    RSign), **data-initialised to the per-channel mean on the first batch**.
+    Found while designing it: ultralytics `Conv` feeds post-SiLU activations
+    to the next conv, which are almost all >= 0, so a plain `sign(x)` would
+    map nearly every input to +1 and carry ~0 bits.
+  - Gradient: IR-Net's Error Decay Estimator (tanh-shaped surrogate whose
+    sharpness `t` anneals 0.1 -> 10). This is how the plan's "progressive
+    binarization" is realised. Forward is always exactly binary, so the
+    train/eval mismatch a soft-forward annealing would cause never happens.
+  - Optional stochastic binarization (plan, constraint 3): `+1` with
+    probability `(tanh(t*x)+1)/2`, so it is noisy early and deterministic by the
+    end of annealing. Training only.
+  - Depthwise convs are never binarized (one sign per tap is the classic BNN
+    failure case, and they're cheap). They fall back to 8-bit.
+- **Region policy** (`policy.py`): every conv in YOLO26 is assigned to one of
+  9 regions (input_conv, stem, p3, backbone_deep, neck_deep, attention,
+  head_one2one, head_out, head_one2many) by layer index. PSABlock/Attention
+  anywhere is caught by type, so the attention inside neck layer 22 stays fp
+  even though the rest of layer 22 is binary. Presets:
+  - `ib_guided` (the plan's summary map): stem/attention fp, P3 path 8-bit,
+    deep backbone + SPPF binary, one2one head 8-bit, one2many fp.
+  - `full` (CHECKLIST section 5's original "fully binarized"): everything
+    binary except raw-pixel first conv, final 1x1 output projections, and
+    the train-only one2many branch.
+  - `fp32` (for the sweep).
+  Per-region overrides in the model config (`model.binarization.regions.p3=4`).
+  **Judgement call flagged**: the plan doesn't say what to do with the neck at
+  P4/P5 (layers 13, 19, 20, 22). It's in `ib_guided` as binary (same resolution
+  and semantics as the deep backbone), but it's its own region so the sweep
+  measures it separately. YOLO26n param share: backbone_deep 41.7%,
+  neck_deep 28.3%, attention 14.6%, p3 5.4%, stem 0.4%. `ib_guided` cuts
+  deployed conv weights from 9.0 MiB (fp32) to ~1.9 MiB, `full` to ~1.0 MiB.
+  - The ultralytics yaml shipped in 8.4.41 has the neck attention as
+    `C3k2(..., attn=True)` at layer 22, not a separate layer as in the paper's
+    ablation. The policy handles both.
+- **Wiring**: `yolo26` and `yolo26_early_fusion` take optional `binarization`
+  and `init_checkpoint` kwargs (fp32 warm start, then swap). New configs
+  `yolo26_bnn` / `yolo26_early_fusion_bnn`. Since `QuantConv2d` keeps the
+  `weight` name, fp32 checkpoints load unchanged.
+- **Trainer**: `train.optimizer` (adam/adamw/sgd; the plan asks to benchmark
+  these for BNN layers), no weight decay on latent binary weights (decay pulls
+  them to 0 where the sign flips every step), `train.grad_clip`, grad-norm
+  logging, and the EDE annealing schedule (`train.binarize_anneal_fraction`).
+  The plan's MuSGD x STE concern doesn't apply yet, because we bypass the
+  ultralytics trainer and never use MuSGD.
+- Fixed `scripts/train_model.py` forcing `model.name=<config file>`. That would
+  have broken any config whose file name differs from its registered detector
+  (all the `*_bnn` configs).
+- **Empirical side of the plan (§4)**:
+  - Small-object AP: `average_precision(..., area_range=...)`, COCO-style
+    (out-of-range GT ignored, not dropped). `evaluate.py` now reports AP@0.5
+    and APS@0.5 (< 32² px, the definition the YOLO26 paper's APS uses).
+    Note `scripts/eval_with_visuals.py` uses a different "small" (<1% of image
+    area ≈ 64² px at 640) for its recall breakdown.
+  - `scripts/binarization_sweep.py`: quantizes one region at a time from a
+    trained fp32 checkpoint, with optional fine-tuning, and reports ΔAP/ΔAPS on
+    **val** so region choices aren't tuned on test.
+  - `scripts/estimate_layer_mi.py` + `analysis/information.py`: per-layer
+    I(X;T) and I(T;Y), with Y = "location inside a person box", using 1-bit
+    median binning over random 12-channel subsets, plug-in counts, and the
+    Miller–Madow correction. Only relative comparisons are meaningful. The
+    absolute values depend on the binning, which is the Saxe et al. caveat, so
+    report it.
+- Tests: 31 new (layers, policy/region map, warm start + checkpoint round
+  trip, BNN detectors train/infer for both presets, APS, MI estimator on a
+  toy model with known answer). End-to-end smoke run on a 72-pair real-data
+  subset: fp32 train → BNN warm-start train (sgd, grad clip, full preset +
+  stochastic, early fusion) → eval → sweep → MI all run. 3 pre-existing
+  failures in `test_manifest.py`/`test_wisard_discovery.py` are unrelated
+  (they fail identically without these changes).
+- **Not done yet**: real-length BNN training runs, a distillation loss
+  from the fp32 teacher (CHECKLIST section 5), actual bitwise kernels/export. This is all
+  simulated quantization in PyTorch, so it measures accuracy, not speed.
+- **Eval speed fix**: a sweep over the full val split (2,398 pairs) took
+  about 2 min per variant. Timing showed the cause was `evaluate_model`'s
+  DataLoader running without `num_workers` (pre-existing in `evaluate.py`),
+  so every image was decoded serially in the main process. The fix passes
+  `cfg.data.num_workers` through and raises the default 4 -> 8 (4 -> 8 workers
+  was +38% loader throughput; 16 added little). One eval went from 110 s to
+  32 s with identical AP/APS. Timing breakdown (RTX 2050): the binarized model
+  forward is the bottleneck now. Simulated quantization is about 2x slower
+  than fp32 (ib_guided 18 vs 8.7 ms/pair), and that's expected until real
+  bitwise kernels exist. Image loading with 8 workers is about 16 s for full
+  val, so pre-resizing the dataset isn't needed for eval.
+
+## 2026-10-01 (Per-region binarization sensitivity sweep — results)
+
+Setup: `yolo26_early_fusion` 30-epoch checkpoint (`2026-09-21_21-04-06/epoch_29.pt`),
+one region binarized at a time, val split (2,398 pairs), APS = AP50 on boxes
+< 32² px. Two runs: post-training only (`--epochs 0`, 14:05) and 3 fine-tune
+epochs per variant (`--epochs 3`, 14:53; Adam lr 1e-3, no schedule, EDE
+annealing over the first half). fp32 reference (not fine-tuned): AP50 0.673, APS50 0.622.
+Results: `runs/sweeps/yolo26_early_fusion_bnn_2026-10-01_{14-05-55,14-53-43}/`.
+
+| region | conv weights | ΔAP50 / ΔAPS50 (0 ep) | ΔAP50 / ΔAPS50 (3 ep) |
+|---|---|---|---|
+| attention | 14.6% | −0.281 / −0.331 | −0.047 / −0.040 |
+| neck_deep | 28.3% | −0.481 / −0.419 | −0.062 / −0.040 |
+| backbone_deep | 41.7% | −0.240 / −0.292 | −0.080 / −0.118 |
+| head_one2one | 4.8% | −0.673 / −0.622 | −0.166 / −0.188 |
+| stem | 0.4% | −0.673 / −0.622 | −0.170 / −0.200 |
+| input_conv | 0.0% | −0.673 / −0.622 | −0.241 / −0.279 |
+| head_out | 0.0% | −0.650 / −0.572 | −0.212 / −0.300 |
+| p3 | 5.4% | −0.673 / −0.622 | −0.487 / −0.589 |
+
+Findings:
+- **The post-training sweep is not a valid ranking.** neck_deep was 2nd-worst
+  of the recoverable regions without fine-tuning and became one of the best after 3 epochs. Use
+  fine-tuned deltas for region decisions; report post-training only as
+  "brittleness before adaptation".
+- **Binarize: backbone_deep, neck_deep, attention.** About 85% of conv weights,
+  each within 0.08 AP of fp32 after only 3 epochs. The three are within about
+  0.03 AP of each other, which is plausibly single-run noise, so their order
+  isn't established. backbone_deep has the largest small-object cost (−0.118
+  ΔAPS vs −0.040).
+- **P3 confirmed as the critical path (plan, DPI + STAL argument).** APS
+  collapses 0.622 → 0.033 even after fine-tuning, for 5.4% of weights. Far
+  beyond noise. Keep ≥ k-bit; the 4 vs 8 bit question is still open.
+- **Attention contradicts the plan's stated reason.** The plan kept it fp
+  because softmax attention is magnitude-sensitive, but binarizing the region
+  binarizes only the convs (qkv/proj/pe/FFN + C2PSA cv1/cv2). The dot products
+  and softmax run on real-valued BN outputs. It is also not "cheap" (14.6%).
+  The argument should become "keep the attention arithmetic fp, binarize the
+  convs around it".
+- **Stem: the plan's decision holds but its explanation doesn't.** The DPI
+  "earliest = worst" reasoning predicts stem ≥ p3 in damage. The data shows
+  stem −0.17 vs p3 −0.49. Hypothesis (untested): the full-precision P3 layers
+  after a binary stem can compensate, while a binary P3 degrades both the
+  backbone P3 features and the neck P3 output feeding the small-object head.
+  Framing that fits better: "where the small-object signal has no fp path
+  around it", not "how early".
+- **head_out, stem, input_conv, head_one2one: poor trades.** 0.17–0.24 AP lost
+  for ≤ 5% of weights (head_out: 384 weights). Supports the presets keeping
+  them ≥ 8-bit/fp. Likely cause for head_out: no BN after it, so a
+  binary-input binary-weight 1x1 over 16/64 channels gives coarse box/score
+  outputs.
+- Caveats: single run per variant (no seeds/error bars), 3 epochs, fixed
+  lr 1e-3, one checkpoint, val only.
+
+## 2026-10-01 (P3 precision + compute share)
+
+- **Compute share differs a lot from weight share** (YOLO26n, 4-ch, 640 input,
+  inference path, 2.61 GMACs total). The weight-share argument in the plan
+  ("binarize where the parameters are") misses the high-resolution layers:
+
+  | region | weights | MACs |
+  |---|---|---|
+  | backbone_deep | 41.7% | 26.6% |
+  | p3 | 5.4% | 25.9% |
+  | neck_deep | 28.3% | 20.6% |
+  | stem | 0.4% | 10.8% |
+  | head_one2one | 4.8% | 8.2% |
+  | attention | 14.6% | 5.6% |
+  | input_conv | 0.0% | 2.3% |
+
+  So for memory, attention is the lever: fp32 attention is ~1.4 MiB of
+  `ib_guided`'s 1.9 MiB, and binarizing its convs gives ~0.55 MiB. For
+  latency/energy, P3 and the stem are the levers.
+- **P3 at k bits** (3 fine-tune epochs, same setup as the region sweep;
+  `runs/sweeps/yolo26_early_fusion_bnn_2026-10-01_21-37-55` and the following
+  4-bit run):
+
+  | P3 | AP50 | ΔAP50 | APS50 | ΔAPS50 | P3 weights |
+  |---|---|---|---|---|---|
+  | fp32 ref | 0.673 | — | 0.622 | — | 520 KiB |
+  | 8-bit | 0.663 | −0.010 | 0.611 | −0.011 | 130 KiB |
+  | 4-bit | 0.606 | −0.067 | 0.545 | −0.077 | 65 KiB |
+  | binary | 0.186 | −0.487 | 0.033 | −0.589 | 16 KiB |
+
+  8-bit is ~lossless. 4-bit costs about as much as binarizing the whole deep
+  backbone (−0.08), but saves only 65 KiB (3.4% of `ib_guided`), and 4-bit
+  kernels are much less available than int8 on ARM CPUs. **Keep P3 at 8-bit.**
+- **Missing control:** the fp32 reference was never fine-tuned. Deltas of about
+  0.01 (P3 8-bit) and the 0.05–0.08 spread between attention, neck_deep and
+  backbone_deep can't be separated from the effect of 3 more epochs at lr 1e-3
+  until an fp32 model fine-tuned with the same settings is evaluated.
+
+## 2026-10-02 (fp32 fine-tune control)
+
+- The sweep compared every 3-epoch fine-tuned BNN variant against an fp32
+  reference that was never fine-tuned. `scripts/binarization_sweep.py` now
+  fine-tunes the fp32 reference with the identical schedule whenever
+  `--epochs > 0` and measures deltas against it (the untouched checkpoint stays
+  as a row). `--regions` may be empty, so the control can run on its own.
+- Control (same checkpoint, 3 epochs, Adam lr 1e-3, no schedule, val;
+  `runs/sweeps/yolo26_early_fusion_bnn_2026-10-02_13-51-30`): fp32 AP50
+  0.673 → **0.677** (+0.004), APS50 0.622 → **0.612** (−0.010).
+- **Fine-tuning alone barely moves fp32**, so the region sweep's deltas are
+  quantization, not extra training. Rebased onto the fine-tuned reference
+  (ΔAP50 / ΔAPS50): attention −0.051 / −0.030, neck_deep −0.066 / −0.030,
+  backbone_deep −0.084 / −0.109, head_one2one −0.170 / −0.178, stem
+  −0.174 / −0.191, head_out −0.216 / −0.290, input_conv −0.245 / −0.269,
+  p3 −0.491 / −0.579. P3 8-bit −0.014 / −0.001, 4-bit −0.071 / −0.067.
+  Every region decision stands.
+- The ±0.01 movement of an fp32 model under 3 more epochs gives a rough idea
+  of the noise floor. Training is unseeded, so the ordering of attention /
+  neck_deep / backbone_deep (~0.03 apart) still needs seeds.
+- Rebased the stored results too: the 3-epoch sweep files (`…_14-53-43`,
+  `…_21-37-55`, `…_22-12-15`) now include the fine-tuned reference row, and
+  `d_ap50`/`d_ap50_small` are against it. The old deltas are kept as
+  `*_vs_untouched`, and the columns `epochs` and `seed` (null, these runs
+  predate seeding) were added.
+
+## 2026-10-02 (seeding)
+
+- Training was unseeded, so no run was reproducible and seed sweeps were
+  impossible. Added `train.seed` (default 0, null = unseeded) and
+  `train.deterministic` (default false). `seed_everything` seeds Python,
+  NumPy and torch (all CUDA devices), and the train DataLoader gets its own
+  seeded generator so the shuffle order doesn't depend on how many random
+  numbers model construction drew. The dataset has no random augmentation,
+  so this covers every source: shuffle order, init of parameters not covered
+  by a warm start, and stochastic binarization.
+- Same seed ≠ bit-identical on GPU: cuDNN picks non-deterministic kernels
+  unless `train.deterministic=true` (slower, so off by default). For seed
+  sweeps that's fine; the spread across seeds is what's being measured.
+- `scripts/train_model.py --seed N`; sweep result rows now record `seed`
+  (`train.seed=N` as a Hydra override to the sweep). Test:
+  `tests/test_seeding.py`.
+
+
+## 2026-10-02 (LR schedule + first full ib_guided run)
+
+- Added `train.scheduler` (`none` | `cosine`), stepped per batch: linear warmup
+  over `train.warmup_epochs`, then cosine decay to `lr * train.min_lr_ratio`
+  (0.01). The default stays `none`, so the 3-epoch sweep settings are
+  unchanged and remain comparable. LR is logged as `train/lr`. Test:
+  `tests/test_scheduler.py`.
+- Started the combined `ib_guided` model (early fusion, warm start from fp32
+  `epoch_29.pt`): 20 epochs, Adam lr 1e-3, cosine with 1 warmup epoch, EDE
+  annealing over the first half, seed 0, evaluated on val at the end. Runner
+  `runs/bnn/train_eval.py`, log and metrics in `runs/bnn/ib_guided_20ep_seed0.*`.
+  Throughput ~2.2 batch/s (~13.5 min/epoch, ~4.5 h total) vs ~3.2 batch/s for
+  fp32, the simulated-quantization overhead.
+- **Stopped by hand at 18:05**, 3 epochs short. The checkpoints `epoch_0.pt` …
+  `epoch_16.pt` (17 of 20 epochs) are in
+  `runs/checkpoints/yolo26_early_fusion_bnn_ib_guided/<ts>/`. Mean train loss
+  fell steadily, 18.3 (epoch 0) → 13.0 (epoch 12), with no instability. It
+  flattened briefly around epoch 10, when EDE annealing finished. No val
+  metrics yet.
+- **This run can't be resumed yet.** Two gaps:
+  1. Checkpoints hold only `model.state_dict()`: no optimizer (Adam moments),
+     scheduler position, global step (which drives the EDE annealing
+     progress) or RNG state. A restart would redo the warmup and the
+     annealing from scratch.
+  2. `model.init_checkpoint` loads into the fp32 model *before* the
+     binarization swap (`warm_start_and_binarize`, `_ultralytics_common.py`).
+     Loading a BNN checkpoint that way discards the learned `QuantConv2d`
+     parameters (input thresholds τ, etc.) as unexpected keys and
+     re-initialises them from data. So `init_checkpoint` is for fp32 warm
+     starts only.
+  Evaluating a saved BNN checkpoint is fine as it is: `evaluate.py` builds the
+  binarized model first and then loads the state dict
+  (`eval.checkpoint_path=…`).
+- **TODO next session:**
+  1. Save full training state each epoch (model, optimizer, scheduler, step,
+     epoch, RNG incl. the DataLoader generator) and add
+     `train.resume=<checkpoint>`, loading after the binarization swap.
+  2. Resume this run from `epoch_16.pt` for the last 3 epochs, then val eval.
+  3. fp32 control on the identical 20-epoch cosine schedule (seed 0), so the
+     BNN result isn't credited with the effect of longer training.
+  4. `ib_guided` + attention binarized, same schedule.
+
+## 2026-10-03 (resumable training + queued runs)
+
+- **Full training state per epoch.** Besides the weights-only `epoch_N.pt`
+  (unchanged, so `evaluate.py`, the sweep and `init_checkpoint` read them as
+  before), every epoch now overwrites `last.pt` with model, optimizer,
+  scheduler, epoch, global step (drives the EDE annealing), all RNG states
+  including the train DataLoader's generator, and the resolved config.
+- **`train.resume=<checkpoint>`** loads *after* `build_model_from_config`, i.e.
+  after the binarization swap, so learned `QuantConv2d` parameters (thresholds
+  τ, the `initialized` flag) survive; the run continues in the checkpoint's own
+  checkpoint/TensorBoard directory (`purge_step` hides events logged after the
+  last checkpoint). With `last.pt` the resume is exact. A weights-only
+  `epoch_N.pt` (all runs before today) also works: the epoch comes from the file
+  name, step / LR schedule / annealing progress are recomputed, and the shuffle
+  order is replayed by iterating a stand-in loader over indices. Only Adam's
+  moments and the global RNG start fresh. Tests: `tests/test_resume.py`
+  (exact round trip, weights-only reconstruction, shuffle replay vs a
+  multi-worker loader).
+- Resumed the stopped `ib_guided` run from `epoch_16.pt`: picks up at epoch 17
+  (step 30005) with loss ≈ 12.9, continuous with epoch 12's 13.0, so the warm
+  state carried over. The last 3 epochs therefore ran with re-initialised Adam
+  moments, on the cosine tail (LR 7% → 1% of peak) — note this when reporting it.
+- Queued on the GPU, back to back (`runs/bnn/queue_2026-10-03.sh`, ~9 h): (1)
+  finish `ib_guided` + val eval, (2) fp32 control, same 20-epoch cosine
+  schedule from the same `epoch_29.pt`, seed 0, (3) `ib_guided` + binary
+  attention, same schedule. Metrics land in `runs/bnn/*.json`.
+- Test runs need `env -u PYTHONPATH`: the shell's ROS Jazzy `PYTHONPATH`
+  loads a `launch_testing` pytest plugin that crashes pytest at startup.
+
+## 2026-10-03 (runner + requirements cleanup)
+
+- The train-then-eval runner moved from `runs/bnn/train_eval.py` (gitignored)
+  to `scripts/train_eval.py`, same arguments (`RUN_NAME OUT_JSON
+  [overrides...]`), now with argparse and no `sys.path` hack. The old copy is
+  deleted.
+- **Queue stopped by hand at 17:30.** Done: `ib_guided` 20 epochs, val AP50
+  0.669 / APS50 0.617 (`runs/bnn/ib_guided_20ep_seed0.json`), vs 0.673 / 0.622
+  for the untouched fp32 checkpoint. Not a final comparison until the
+  same-schedule fp32 control exists. The fp32 control stopped in epoch 7 with
+  epochs 0–6 saved, `last.pt` holding the full state after epoch 6. The
+  `ib_guided` + binary attention run never started.
+  `runs/bnn/queue_2026-10-03.sh` now runs the remaining two through
+  `scripts/train_eval.py`: the control resumes exactly from that `last.pt`.
+- `requirements.txt` was a full `pip freeze` of the dev venv: an `-e
+  git+…@d9c8b9b` line installing the repo from an old commit, the Jupyter
+  stack and other packages nothing imports, unpinned `gdown`, and torch's
+  CUDA 13 runtime wheels pinned explicitly, which blocks installing a CUDA 12
+  torch (needed on clusters with older drivers). It is now the exact
+  dependency closure of `pyproject.toml` (+ dev extras) at the installed
+  versions, 55 pins, without `nvidia-*`/`cuda-*`/`triton`; a dry-run install
+  in a fresh venv resolves cleanly and pulls the same CUDA wheel versions
+  (except `cuda-bindings`, which torch only bounds). The old freeze is not
+  kept in the repo; git history has it. `matplotlib` added to
+  `pyproject.toml`, since the eval scripts import it.
+
+## 2026-10-03 (Slurm cluster setup)
+
+- Cluster survey: Ubuntu 22.04 (glibc 2.35, so manylinux torch wheels load),
+  modules only up to Python 3.9 / CUDA 11.8, so neither is used. pip's torch
+  wheel brings its own CUDA runtime, and only the driver matters: A40 nodes
+  run **615.71**, so the pinned CUDA 13 build works unchanged. Training
+  partitions: `a40q` (4 nodes × 1 A40 48 GB, 128 cores, 1 TB RAM, ~113 GB free
+  local `/tmp`) as the default, `a100q`/`hgx2q` for more. Not used:
+  `gh200q`/`aarch*` (aarch64, would need a second environment) and the MI210
+  nodes (ROCm). Compute nodes have internet. 14-day time limit.
+- `scripts/slurm/setup_env.sh`: uv-managed Python 3.12 + pinned requirements
+  into `.venv` (the system Python is 3.10, below what the pinned numpy needs).
+  `scripts/slurm/job.sbatch`: generic GPU job for any Hydra entry point. It
+  stages the dataset to node-local `/tmp/$USER` (persistent, rsync-checked,
+  flock-guarded), sets `data.raw_root`/`data.num_workers` and supports
+  `{task}` array placeholders.
+- To pass machine defaults without breaking argparse (the sweep's `--regions
+  nargs="*"` would swallow appended overrides), `load_config` in `train.py`
+  and `evaluate.py` now prepends `$BCV_OVERRIDES` to the explicit overrides,
+  and the explicit ones win. Test: `tests/test_env_overrides.py`. The plotting
+  scripts (`eval_with_visuals.py`, `eval_detailed.py`, `debug_boxes.py`) have
+  their own config loaders and don't read it.
+- Verified locally only (no Slurm here): job script run directly on a CPU
+  subset, `{task}` → seed, staging commands. First real cluster job pending.
+- Storage: two filesystems are shared with the compute nodes: `/home` (NFS
+  from `master`, 268 TB free) and `/global/D1` (BeeGFS, 515 TB, 98% full,
+  per-user dir `/global/D1/homes/$USER`). `/work` (XFS, 4.2 TB) and
+  `/scratch` are local disks of the login node. Dataset goes to
+  `/global/D1/homes/$USER/bcv-data/raw`, code/venv/`runs/` stay in `~`.
+  `job.sbatch` still stages the data to node-local `/tmp` (~113 GB free on
+  `a40q` nodes), since BeeGFS small-file reads by 14 workers may be slow and
+  the filesystem is nearly full. Worth one `BCV_STAGE=0` comparison run.

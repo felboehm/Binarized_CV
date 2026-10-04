@@ -234,6 +234,7 @@ __marimo__/
 /runs/*
 !/runs/.gitkeep
 wandb/
+docs/
 *.pt
 *.pth
 *.onnx
