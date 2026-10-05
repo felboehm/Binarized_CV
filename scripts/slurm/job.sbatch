@@ -19,10 +19,15 @@
 #   BCV_STAGE      1 = copy BCV_DATA to node-local /tmp first (default 1)
 #   BCV_OVERRIDES  extra default overrides, appended to the ones set here
 #
-#SBATCH --partition=a40q
+# Partition: a100q (n013/n014, x86_64, 2x A100 each). Not a40q: its nodes
+# (n009-n012) are aarch64, so the x86_64 .venv doesn't run there.
+# No --mem: the GPU nodes are configured with RealMemory=1 (MB), so any
+# memory request is rejected ("Memory specification can not be satisfied").
+# Memory isn't tracked there; the job can use the node's RAM.
+#
+#SBATCH --partition=a100q
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
 #SBATCH --time=1-00:00:00
 #SBATCH --output=runs/slurm/%x_%j.out
 set -euo pipefail
@@ -32,6 +37,13 @@ cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
 BCV_DATA="${BCV_DATA:-$PWD/data/raw}"
 BCV_STAGE="${BCV_STAGE:-1}"
 export TQDM_MININTERVAL=60  # one progress line per minute in the log, not per batch
+
+# Fail before staging if the venv can't run here: .venv is built on the
+# x86_64 login node, and some GPU nodes (a40q = n009-n012) are aarch64.
+if ! .venv/bin/python -c "" 2>/dev/null; then
+    echo "error: .venv/bin/python does not run on $(hostname) ($(uname -m)); use an x86_64 partition" >&2
+    exit 1
+fi
 
 # Node-local copy of the dataset: reading ~120k JPEGs from shared storage
 # would starve the GPU. The copy persists in /tmp/$USER across jobs, so later

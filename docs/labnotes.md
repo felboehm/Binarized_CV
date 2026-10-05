@@ -869,3 +869,19 @@ Findings:
   `job.sbatch` still stages the data to node-local `/tmp` (~113 GB free on
   `a40q` nodes), since BeeGFS small-file reads by 14 workers may be slow and
   the filesystem is nearly full. Worth one `BCV_STAGE=0` comparison run.
+
+## 2026-10-05 (first cluster jobs)
+
+- **Correction to 2026-10-03:** the `a40q` nodes (n009–n012, also in
+  `aarchq`/`huaq`) are **aarch64**. The survey had checked the x86_64 login
+  node. The x86_64 `.venv` fails there under the binfmt emulator
+  (`x86_64-binfmt-P: Could not open '/lib64/ld-linux-x86-64.so.2'`).
+  Default partition is now `a100q` (n013/n014, x86_64, 2× A100-PCIE-40GB,
+  driver 615.71, 100 GB free `/tmp` for the 43 GB dataset). `job.sbatch`
+  checks that `.venv/bin/python` runs before staging.
+- The GPU nodes report `RealMemory=1` (MB) to Slurm, so any `--mem` request
+  fails with "Memory specification can not be satisfied". Removed `--mem`
+  from `job.sbatch`.
+- `setup_env.sh` sets `UV_SYSTEM_CERTS=1`: uv's bundled CA roots reject the
+  cluster's TLS certificates (`UnknownIssuer`) when downloading Python.
+- Staging the dataset to node-local `/tmp` took ~10 min on the first run (n010).

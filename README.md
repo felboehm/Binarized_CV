@@ -235,7 +235,8 @@ uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
 ### 6. Running on the Slurm cluster
 
 Scripts in `scripts/slurm/`. They're tuned for the cluster in use (Ubuntu 22.04,
-`a40q`: A40 nodes with driver 615, internet on compute nodes, local `/tmp`),
+`a100q`: x86_64 nodes with A100s and driver 615, internet on compute nodes,
+local `/tmp`; the `a40q` nodes are aarch64 and can't run the x86_64 venv),
 but nothing in them is specific to it except the default partition.
 
 ```bash
@@ -271,15 +272,17 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
   on the node, because reading ~120k JPEGs from shared storage would starve
   the GPU. The copy persists, so later jobs on the same node only run
   rsync's check. `BCV_STAGE=0` reads `$BCV_DATA` directly. Remove the copy
-  when done (`srun -p a40q -w <node> rm -rf /tmp/$USER/bcv-data`).
+  when done (`srun -p a100q -w <node> --mem=0 rm -rf /tmp/$USER/bcv-data`).
 - **Cluster defaults:** it sets `data.raw_root` and `data.num_workers`
   (`--cpus-per-task` − 2) through `$BCV_OVERRIDES`. `load_config` reads that
   variable *before* the command-line overrides, so anything passed explicitly
   still wins.
 - **Job arrays:** `{task}` in the arguments becomes `$SLURM_ARRAY_TASK_ID`, for
   seed or region arrays, e.g. `sbatch --array=0-2 … train.seed={task}`.
-- **Resources:** the defaults are `a40q`, 1 GPU, 16 CPUs, 64 GB, 1 day.
-  Override them on the `sbatch` command line (`-p a100q`, `-c 32`, `-t 3-00:00:00`).
+- **Resources:** the defaults are `a100q`, 1 GPU, 16 CPUs, 1 day. Override them
+  on the `sbatch` command line (`-p hgx2q`, `-c 32`, `-t 3-00:00:00`). There is
+  no `--mem`: the GPU nodes report 1 MB of memory to Slurm, so any memory
+  request fails.
 - **Logs:** progress bars update once a minute (`TQDM_MININTERVAL=60`) to keep
   the logs readable.
 

@@ -17,13 +17,13 @@ fi
 
 # Use the system CA store: uv's bundled roots reject the cluster's TLS
 # certificates ("invalid peer certificate: UnknownIssuer"), curl's don't.
-export UV_NATIVE_TLS=1
+export UV_SYSTEM_CERTS=1
 
 uv python install 3.12
 mkdir -p runs/slurm  # sbatch --output dir must exist at submit time
 [ -d .venv ] || uv venv --python 3.12 .venv
 # Default PyPI torch wheel = CUDA 13 build; needs NVIDIA driver >= 580
-# (a40q: 615.71, checked 2026-10-03).
+# (a100q: 615.71, checked 2026-10-05).
 uv pip install --python .venv/bin/python -r requirements.txt
 uv pip install --python .venv/bin/python -e . --no-deps
 
