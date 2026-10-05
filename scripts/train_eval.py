@@ -24,8 +24,25 @@ import json
 import logging
 from pathlib import Path
 
+from binarized_cv.data.manifest import load_manifest
 from binarized_cv.eval.evaluate import evaluate_model
 from binarized_cv.train import train
+
+
+def check_images(cfg) -> None:
+    """Fail before training if images of train/val/test records are missing
+    under data.raw_root (an incomplete data copy otherwise crashes the run
+    whenever the first missing file comes up)."""
+    raw_root = Path(cfg.data.raw_root)
+    missing = [
+        path
+        for r in load_manifest(cfg.data.manifest_path)
+        if r.split in ("train", "val", "test")
+        for path in (r.rgb_image, r.ir_image)
+        if not (raw_root / path).exists()
+    ]
+    if missing:
+        raise SystemExit(f"{len(missing)} images missing under {raw_root}, e.g. {missing[:3]}")
 
 
 def main() -> None:
@@ -37,6 +54,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO)
     cfg, _ = train.load_config(args.overrides)
+    check_images(cfg)
     model = train.main(cfg, model_name=args.run_name)
     metrics = evaluate_model(model, cfg, split="val")
     metrics |= {f"test_{k}": v for k, v in evaluate_model(model, cfg, split="test").items()}

@@ -261,8 +261,9 @@ rsync -a --mkpath data/raw/ cluster:/global/D1/homes/$USER/bcv-data/raw/
 rsync -a data/processed/manifest.jsonl data/processed/manifest_aligned.jsonl cluster:<repo>/data/processed/
 rsync -aR runs/checkpoints/yolo26_early_fusion/2026-09-21_21-04-06/epoch_29.pt cluster:<repo>/
 
-# 3. Submit from the repo root (Slurm resolves --output and the repo from there)
-export BCV_DATA=/global/D1/homes/$USER/bcv-data/raw
+# 3. Submit from the repo root (Slurm resolves --output and the repo from there).
+#    BCV_DATA defaults to /global/D1/homes/$USER/bcv-data/raw; export it only
+#    for another location.
 sbatch -J ib_guided_attn scripts/slurm/job.sbatch scripts/train_eval.py \
     yolo26_early_fusion_bnn_ib_guided_attn runs/bnn/ib_guided_attn_20ep_seed0.json \
     model=yolo26_early_fusion_bnn \
@@ -275,7 +276,8 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
 `job.sbatch` runs any entry point that takes Hydra overrides (`train_eval.py`,
 `binarization_sweep.py`, `estimate_layer_mi.py`):
 
-- **Data staging:** it first copies `$BCV_DATA` to `/tmp/$USER/bcv-data/raw`
+- **Data staging:** it checks that `$BCV_DATA` contains images (default
+  `/global/D1/homes/$USER/bcv-data/raw`), then copies it to `/tmp/$USER/bcv-data/raw`
   on the node, because reading ~120k JPEGs from shared storage would starve
   the GPU. The copy persists, so later jobs on the same node only run
   rsync's check. `BCV_STAGE=0` reads `$BCV_DATA` directly. Remove the copy

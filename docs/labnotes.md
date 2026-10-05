@@ -1051,3 +1051,13 @@ Findings:
   README §2 and the cluster rsync line list both manifests. The dataset
   warns if alignment is on but no record has a transform (old manifest).
   `ir_alignment=none` reproduces the pre-alignment input.
+- **Staging wiped the node copy.** The first fp32 baseline (job 1425273)
+  crashed with a missing FHL VIS_0407 image under `/tmp/feboe/bcv-data/raw`
+  although the file exists locally. Cause, most likely: `BCV_DATA` not
+  exported in the submitting shell, so `job.sbatch` staged from its default,
+  the repo's `data/raw` (only `.gitkeep` on the cluster), with `rsync
+  --delete`, which emptied the node copy (and would break any job reading it
+  at the time). Fixes: default `BCV_DATA` is now the BeeGFS copy; the job
+  stops if `BCV_DATA` contains no images; no `--delete` when staging;
+  `train_eval.py` checks that all train/val/test images exist under
+  `data.raw_root` before training (~5 s, fails with count + examples).

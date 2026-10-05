@@ -15,7 +15,7 @@
 # the explicit overrides), so passing them in ARGS still overrides them.
 #
 # Environment (export before sbatch, or edit the defaults):
-#   BCV_DATA       shared copy of data/raw (default: <repo>/data/raw)
+#   BCV_DATA       shared copy of data/raw (default: /global/D1/homes/$USER/bcv-data/raw)
 #   BCV_STAGE      1 = copy BCV_DATA to node-local /tmp first (default 1)
 #   BCV_OVERRIDES  extra default overrides, appended to the ones set here
 #
@@ -38,7 +38,7 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
 [ $# -ge 1 ] || { echo "usage: sbatch scripts/slurm/job.sbatch SCRIPT [ARGS...]" >&2; exit 2; }
 
-BCV_DATA="${BCV_DATA:-$PWD/data/raw}"
+BCV_DATA="${BCV_DATA:-/global/D1/homes/$USER/bcv-data/raw}"
 BCV_STAGE="${BCV_STAGE:-1}"
 export TQDM_MININTERVAL=60  # one progress line per minute in the log, not per batch
 
@@ -49,16 +49,25 @@ if ! .venv/bin/python -c "" 2>/dev/null; then
     exit 1
 fi
 
+# The repo's own data/raw holds only .gitkeep files on the cluster; staging
+# from it (once the default when BCV_DATA wasn't exported) emptied the node
+# copy and crashed the job, and any other job reading that copy.
+if [ -z "$(find "$BCV_DATA/" -name '*.jp*g' -print -quit 2>/dev/null)" ]; then
+    echo "error: BCV_DATA=$BCV_DATA contains no images; export BCV_DATA=<shared copy of data/raw>" >&2
+    exit 1
+fi
+
 # Node-local copy of the dataset: reading ~120k JPEGs from shared storage
 # would starve the GPU. The copy persists in /tmp/$USER across jobs, so later
 # jobs on the same node only pay rsync's file-list check. flock serialises
-# jobs that start on the same node at the same time.
+# jobs that start on the same node at the same time. No --delete: other jobs
+# on the node may be reading the copy, and a stale extra file is harmless.
 raw_root="$BCV_DATA"
 if [ "$BCV_STAGE" = 1 ]; then
     raw_root="/tmp/$USER/bcv-data/raw"
     mkdir -p "$raw_root"
     echo "[$(date +%T)] staging $BCV_DATA -> $raw_root"
-    flock "/tmp/$USER/bcv-data.lock" rsync -a --delete "$BCV_DATA/" "$raw_root/"
+    flock "/tmp/$USER/bcv-data.lock" rsync -a "$BCV_DATA/" "$raw_root/"
     echo "[$(date +%T)] staged"
 fi
 
