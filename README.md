@@ -282,7 +282,8 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
 - **Resources:** the defaults are `a100q`, 1 GPU, 16 CPUs, 1 day. Override them
   on the `sbatch` command line (`-p hgx2q`, `-c 32`, `-t 3-00:00:00`). There is
   no `--mem`: the GPU nodes report 1 MB of memory to Slurm, so any memory
-  request fails.
+  request fails. `--propagate=NONE` keeps the login node's 16 GB `ulimit -v`
+  out of the job; torch can't allocate memory under it.
 - **Logs:** progress bars update once a minute (`TQDM_MININTERVAL=60`) to keep
   the logs readable.
 

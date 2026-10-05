@@ -24,11 +24,15 @@
 # No --mem: the GPU nodes are configured with RealMemory=1 (MB), so any
 # memory request is rejected ("Memory specification can not be satisfied").
 # Memory isn't tracked there; the job can use the node's RAM.
+# --propagate=NONE: don't inherit the login node's ulimits, in particular its
+# 16 GB virtual-memory cap (ulimit -v), which makes torch fail with
+# "DefaultCPUAllocator: can't allocate memory" before training starts.
 #
 #SBATCH --partition=a100q
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=1-00:00:00
+#SBATCH --propagate=NONE
 #SBATCH --output=runs/slurm/%x_%j.out
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"

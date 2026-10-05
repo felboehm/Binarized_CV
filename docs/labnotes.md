@@ -885,3 +885,8 @@ Findings:
 - `setup_env.sh` sets `UV_SYSTEM_CERTS=1`: uv's bundled CA roots reject the
   cluster's TLS certificates (`UnknownIssuer`) when downloading Python.
 - Staging the dataset to node-local `/tmp` took ~10 min on the first run (n010).
+- The login node sets `ulimit -v` to 16 GB, and Slurm propagates the
+  submitting shell's limits by default, so the smoke test on n014 failed while
+  building the model (`DefaultCPUAllocator: can't allocate memory: you tried
+  to allocate 65536 bytes`). `job.sbatch` now has `--propagate=NONE`; with it
+  the node's own limit (`unlimited`) applies. Staging on n014 took 2.5 min.
