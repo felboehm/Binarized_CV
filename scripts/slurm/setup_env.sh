@@ -15,6 +15,10 @@ if ! command -v uv >/dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
 fi
 
+# Use the system CA store: uv's bundled roots reject the cluster's TLS
+# certificates ("invalid peer certificate: UnknownIssuer"), curl's don't.
+export UV_NATIVE_TLS=1
+
 uv python install 3.12
 mkdir -p runs/slurm  # sbatch --output dir must exist at submit time
 [ -d .venv ] || uv venv --python 3.12 .venv

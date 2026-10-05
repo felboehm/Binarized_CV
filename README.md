@@ -249,7 +249,7 @@ bash scripts/slurm/setup_env.sh
 #    (/global/D1, per-user dir under homes/); /work and /scratch are local
 #    disks of the login node. The manifest's paths are relative to
 #    data.raw_root.
-rsync -a data/raw/ cluster:/global/D1/homes/$USER/bcv-data/raw/
+rsync -a --mkpath data/raw/ cluster:/global/D1/homes/$USER/bcv-data/raw/
 rsync -a data/processed/manifest.jsonl cluster:<repo>/data/processed/
 rsync -aR runs/checkpoints/yolo26_early_fusion/2026-09-21_21-04-06/epoch_29.pt cluster:<repo>/
 
