@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 """
-Train a model, then evaluate the final weights on val and write the metrics
-as JSON. Non-interactive, for queued and batch (Slurm) runs.
+Train a model, then evaluate the final weights on val and test and write the
+metrics as JSON (val as `ap50`/`ap50_small`, test as `test_ap50`/
+`test_ap50_small`). Non-interactive, for queued and batch (Slurm) runs.
+
+With train.scheduler=plateau the returned weights are the best val epoch, so
+the val numbers are biased upwards; report test for those runs.
 
 Usage:
     python scripts/train_eval.py RUN_NAME OUT_JSON [hydra overrides...]
@@ -35,6 +39,7 @@ def main() -> None:
     cfg, _ = train.load_config(args.overrides)
     model = train.main(cfg, model_name=args.run_name)
     metrics = evaluate_model(model, cfg, split="val")
+    metrics |= {f"test_{k}": v for k, v in evaluate_model(model, cfg, split="test").items()}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"overrides": args.overrides, **metrics}, indent=2))
     print(json.dumps(metrics))

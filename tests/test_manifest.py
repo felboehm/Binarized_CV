@@ -11,7 +11,7 @@ def _make_trgb_pair(raw_root, image_id):
 
 
 def _make_wisard_pair(raw_root, frame_index):
-    sample_root = raw_root / "wisard" / "WiSARD_Multi_Modal_Sample"
+    sample_root = raw_root / "wisard"
     vis_dirname = "flightA_VIS_0001"
     ir_dirname = "flightA_IR_0002"
     for dirname in (vis_dirname, ir_dirname):

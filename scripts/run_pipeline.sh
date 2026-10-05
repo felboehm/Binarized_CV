@@ -27,7 +27,7 @@ if [ -z "${DEVICE:-}" ]; then
   fi
 fi
 RAW_ROOT="${RAW_ROOT:-data/raw}"
-MANIFEST="${MANIFEST:-data/processed/manifest.jsonl}"
+MANIFEST="${MANIFEST:-data/processed/manifest_aligned.jsonl}"
 RUN_NAME="${RUN_NAME:-${MODEL}_$(date +%Y%m%d_%H%M%S)}"
 CHECKPOINT_DIR="runs/checkpoints/${RUN_NAME}"
 LOG_DIR="runs/tensorboard/${RUN_NAME}"
@@ -36,7 +36,8 @@ echo "== Step 1/3: manifest =="
 if [[ -f "$MANIFEST" ]]; then
   echo "Already exists at $MANIFEST (delete it to force a rebuild) — skipping."
 else
-  python scripts/build_manifest.py --raw-root "$RAW_ROOT" --out "$MANIFEST"
+  python scripts/build_manifest.py --raw-root "$RAW_ROOT" --out data/processed/manifest.jsonl
+  python scripts/align_manifest.py --raw-root "$RAW_ROOT" --manifest data/processed/manifest.jsonl --out "$MANIFEST"
 fi
 
 echo "== Step 2/3: train '$MODEL' for $EPOCHS epoch(s) =="

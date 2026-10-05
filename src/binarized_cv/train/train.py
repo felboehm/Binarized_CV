@@ -55,6 +55,8 @@ def build_dataloader(
         split=split,
         img_size=tuple(cfg.data.img_size),
         target_modality=cfg.data.target_modality,
+        drop_misaligned=split in cfg.data.get("drop_misaligned_splits", []),
+        ir_alignment=cfg.data.get("ir_alignment", "none"),
     )
     return DataLoader(
         dataset,
@@ -82,19 +84,69 @@ def build_optimizer(model: torch.nn.Module, train_cfg: DictConfig) -> torch.opti
     raise ValueError(f"Unknown optimizer {name!r} (adam | adamw | sgd)")
 
 
+class PlateauFactor:
+    """LR factor for `scheduler: plateau`: linear warmup, then a constant
+    scale that `update` cuts by `factor` once the validation metric hasn't
+    improved by `min_delta` for `patience` evaluations, and that signals a
+    stop when it would need a cut beyond `max_drops`. A callable object, not a
+    closure, so LambdaLR's state_dict (and so `last.pt`) carries the plateau
+    state across a resume."""
+
+    def __init__(self, warmup_steps: int, patience: int, factor: float, max_drops: int, min_delta: float) -> None:
+        self.warmup_steps = warmup_steps
+        self.patience = patience
+        self.factor = factor
+        self.max_drops = max_drops
+        self.min_delta = min_delta
+        self.scale = 1.0
+        self.best = -math.inf
+        self.bad_evals = 0
+        self.drops = 0
+
+    def __call__(self, step: int) -> float:
+        warm = (step + 1) / self.warmup_steps if step < self.warmup_steps else 1.0
+        return warm * self.scale
+
+    def update(self, metric: float) -> tuple[bool, bool]:
+        """Record one evaluation; returns (improved, stop)."""
+        if metric > self.best + self.min_delta:
+            self.best, self.bad_evals = metric, 0
+            return True, False
+        self.bad_evals += 1
+        if self.bad_evals < self.patience:
+            return False, False
+        if self.drops == self.max_drops:
+            return False, True
+        self.scale *= self.factor
+        self.drops += 1
+        self.bad_evals = 0
+        return False, False
+
+
 def build_scheduler(
     optimizer: torch.optim.Optimizer, train_cfg: DictConfig, steps_per_epoch: int
 ) -> torch.optim.lr_scheduler.LambdaLR | None:
-    """Per-step LR schedule: linear warmup, then cosine decay to
-    `lr * min_lr_ratio`. `scheduler: none` keeps the LR constant (what all
-    sweeps so far used)."""
+    """Per-step LR schedule. `cosine`: linear warmup, then cosine decay to
+    `lr * min_lr_ratio` over `epochs`. `plateau`: linear warmup, then cut the
+    LR when val AP stalls and stop after the last cut (train to convergence,
+    `epochs` is only a cap; see PlateauFactor). `none` keeps the LR constant
+    (what all sweeps so far used)."""
     name = train_cfg.get("scheduler", "none")
     if name == "none":
         return None
-    if name != "cosine":
-        raise ValueError(f"Unknown scheduler {name!r} (none | cosine)")
-    total = train_cfg.epochs * steps_per_epoch
     warmup = int(train_cfg.get("warmup_epochs", 0) * steps_per_epoch)
+    if name == "plateau":
+        factor = PlateauFactor(
+            warmup,
+            patience=train_cfg.get("plateau_patience", 3),
+            factor=train_cfg.get("plateau_factor", 0.1),
+            max_drops=train_cfg.get("plateau_max_drops", 2),
+            min_delta=train_cfg.get("plateau_min_delta", 0.001),
+        )
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+    if name != "cosine":
+        raise ValueError(f"Unknown scheduler {name!r} (none | cosine | plateau)")
+    total = train_cfg.epochs * steps_per_epoch
     min_ratio = train_cfg.get("min_lr_ratio", 0.01)
 
     def factor(step: int) -> float:
@@ -261,7 +313,13 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
     optimizer = build_optimizer(model, cfg.train)
     scheduler = build_scheduler(optimizer, cfg.train, len(train_loader))
     binarized = has_quantized_layers(model)
-    anneal_steps = int(cfg.train.get("binarize_anneal_fraction", 0.0) * cfg.train.epochs * len(train_loader))
+    anneal_epochs = cfg.train.get("binarize_anneal_epochs")
+    if anneal_epochs is None:
+        anneal_epochs = cfg.train.get("binarize_anneal_fraction", 0.0) * cfg.train.epochs
+    anneal_steps = int(anneal_epochs * len(train_loader))
+    plateau = scheduler.lr_lambdas[0] if scheduler is not None and isinstance(scheduler.lr_lambdas[0], PlateauFactor) else None
+    val_each_epoch = plateau is not None or cfg.train.get("val_each_epoch", False)
+    plateau_metric = cfg.train.get("plateau_metric", "ap50")
     grad_clip = cfg.train.get("grad_clip")
 
     start_epoch, step = 0, 0
@@ -331,9 +389,37 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
         log.info("epoch %d done (loss=%.4f)", epoch, loss.item())
         checkpoint_path = checkpoint_dir / f"epoch_{epoch}.pt"
         torch.save(model.state_dict(), checkpoint_path)
+
+        stop = False
+        if val_each_epoch:
+            from binarized_cv.eval.evaluate import evaluate_model  # evaluate imports this module
+
+            metrics = evaluate_model(model, cfg, split="val")
+            for name, value in metrics.items():
+                writer.add_scalar(f"val/{name}", value, step)
+            log.info("epoch %d val: %s", epoch, " ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
+            if plateau is not None:
+                improved, stop = plateau.update(metrics[plateau_metric])
+                if improved:
+                    torch.save(model.state_dict(), checkpoint_dir / "best.pt")
+                log.info(
+                    "plateau: best %s=%.4f, %d/%d evals without improvement, LR scale %g (%d/%d cuts)",
+                    plateau_metric, plateau.best, plateau.bad_evals, plateau.patience,
+                    plateau.scale, plateau.drops, plateau.max_drops,
+                )
+        # After the plateau update, so a resume continues with its state.
         save_training_state(checkpoint_dir / "last.pt", model, optimizer, scheduler, epoch, step, generator, cfg)
+        if stop:
+            log.info("converged: no %s improvement after the last LR cut, stopping after epoch %d", plateau_metric, epoch)
+            break
+    else:
+        if plateau is not None:
+            log.warning("reached train.epochs=%d before the plateau schedule converged", cfg.train.epochs)
 
     writer.close()
+    if plateau is not None and (checkpoint_dir / "best.pt").exists():
+        model.load_state_dict(torch.load(checkpoint_dir / "best.pt", map_location=device))
+        log.info("returning best.pt (val %s=%.4f)", plateau_metric, plateau.best)
     return model
 
 

@@ -1,6 +1,20 @@
 raw_root: data/raw
-manifest_path: data/processed/manifest.jsonl
+# Aligned manifest from scripts/align_manifest.py (raw discovery output:
+# manifest.jsonl, built by scripts/build_manifest.py).
+manifest_path: data/processed/manifest_aligned.jsonl
 img_size: [640, 640]
 target_modality: rgb
+# Splits in which records with checked-misaligned IR (align_ok: false, only in
+# manifest_aligned.jsonl from scripts/align_manifest.py) are dropped. Train
+# only by default: dropping hard frames from val/test would flatter the
+# evaluation and make it incomparable.
+drop_misaligned_splits: [train]
+# How IR is placed relative to RGB, using the per-record ir_transform of
+# manifest_aligned.jsonl (records without one fall back to none):
+# none (stretch both to img_size, unaligned) | warp (IR warped onto the RGB
+# grid, black outside its footprint) | crop (both cropped to the shared field
+# of view, then scaled to img_size; boxes clipped). warp keeps every RGB
+# label and the full frame, so results stay comparable to RGB-only models.
+ir_alignment: warp
 batch_size: 8
 num_workers: 8

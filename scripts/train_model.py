@@ -63,7 +63,7 @@ OVERRIDE_MAPPING = {
 
 def check_manifest_exists() -> bool:
     """Check if the manifest file exists."""
-    manifest_path = Path("data/processed/manifest.jsonl")
+    manifest_path = Path("data/processed/manifest_aligned.jsonl")
     return manifest_path.exists()
 
 
@@ -239,8 +239,8 @@ Examples:
 
     # Check manifest
     if not check_manifest_exists():
-        print("✗ Manifest not found at data/processed/manifest.jsonl")
-        print("  Please run: python scripts/build_manifest.py")
+        print("✗ Manifest not found at data/processed/manifest_aligned.jsonl")
+        print("  Please run: python scripts/build_manifest.py && python scripts/align_manifest.py")
         return 1
 
     print("=" * 70)

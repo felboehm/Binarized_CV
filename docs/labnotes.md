@@ -890,3 +890,164 @@ Findings:
   building the model (`DefaultCPUAllocator: can't allocate memory: you tried
   to allocate 65536 bytes`). `job.sbatch` now has `--propagate=NONE`; with it
   the node's own limit (`unlimited`) applies. Staging on n014 took 2.5 min.
+- Smoke test on n014 passed (1 epoch, 5 min on the A100, val AP50 0.537).
+  Seed arrays: `scripts/slurm/submit_seeds.sh` (one job array per config) and
+  `scripts/collect_results.py` (mean ± std over seeds).
+- **Training to convergence:** `train.scheduler=plateau`. Val AP50 after
+  every epoch (also logged as `val/*` in TensorBoard). LR ×0.1 after 3
+  epochs without a 0.001 gain, stop at the stall after the 2nd cut;
+  `train.epochs` is only a cap. The plateau state lives in the LambdaLR
+  factor object, so it's in `last.pt` and survives a resume. Keeps `best.pt`
+  and returns it, so val is biased for these runs: `train_eval.py` now also
+  writes test metrics (`test_ap50`, `test_ap50_small`) to the JSON.
+  `train.binarize_anneal_epochs` fixes the EDE anneal length, since a
+  fraction of a cap means nothing. Submit with
+  `SCHEDULE=plateau bash scripts/slurm/submit_seeds.sh 0-2`.
+- **WiSARD split was leaky; now flight-wise.** The frame-index split
+  (`frame % 100`: <70 train, <85 val, else test) put consecutive, near-identical
+  frames of every sequence into all three splits, and WiSARD is 14,116 of the
+  18,888 records. Only 5 WiSARD flights have paired VIS/IR frames, so whole
+  flights now go to one split (`FLIGHT_SPLITS` in `datasets/wisard.py`):
+  train FHL 8,485 + Hannegan 1,136 + MtErie 263, val Carnation 2,052, test
+  Baker 2,180 (70.0/14.5/15.4%). New manifest: train 14,002, val 2,376, test
+  2,510 (TRGB unchanged, 4,118/324/330). Old manifest kept as
+  `data/processed/manifest_frame_split_2026-10-05.jsonl`.
+- **Every number so far is on the leaky split** (0.726 test / 0.673 val
+  baseline, the binarization sweep, `ib_guided` 0.669), and the fp32
+  warm-start `epoch_29.pt` was trained on ~70% of the frames of Carnation and
+  Baker, so it can't be the warm start for runs on the new split either.
+  The fp32 early fusion baseline has to be retrained first.
+- Not fixed, worth checking: in FHL VIS_0403/0564/0566 the VIS side has no
+  labels (`count.txt`: 0 humans) while the IR side has 216/712/690 labeled
+  frames. With `target_modality=rgb` those ~3,300 frames train as pure
+  negatives. Either people are invisible in VIS there (canopy) or VIS was
+  never labeled. Hannegan and FHL 0409 have no people in either modality.
+- 3 tests had failed since `d0f0ce2`: they still built the old
+  `wisard/WiSARD_Multi_Modal_Sample/` layout and expected `split="unassigned"`.
+  Fixed; `test_splits_whole_flights` added.
+- **Two more WiSARD discovery bugs, fixed.** (1) Frame numbers were matched as
+  strings, but some pairs zero-pad differently (VIS `_00000000` vs IR
+  `_00000` or `_out_frame_00001`), so MtErie VIS_0005/IR_0006 (272),
+  VIS_0007/IR_0008 (172) and FHL VIS_0134/IR_0135 (273) gave 0 records
+  although both sides have the same image counts. Now matched as ints: +717
+  frames, all in train. (2) IDs held only the flight, not the sequence, so
+  7,082 IDs were duplicates; now `wisard_<VIS dir>_<frame:08d>`.
+- **Unlabeled sequences kept, flagged.** `PairRecord` has `rgb_labeled` /
+  `ir_labeled` (default true, so old manifests load). Set false for VIS of
+  FHL 0403/0564/0566 and IR of Carnation 0026, FHL 0127/0408 (`count.txt`:
+  0 humans, no label files, other modality has people). The dataset skips
+  records whose target modality is unlabeled, so they're not negatives; they
+  stay in the manifest to get labels from the other modality once alignment
+  exists. Checked visually (`runs/label_check/`): people clearly visible in
+  VIS_0403, partly under canopy in VIS_0564, VIS_0566 is a night flight.
+- Manifest now 19,605 records (WiSARD 14,833): train 14,719 / val 2,376 /
+  test 2,510; with `target_modality=rgb` train is 11,413.
+- Platforms: all paired flights are `*_Enterprise_*` (Mavic 2 Enterprise
+  Advanced, one rigid dual camera). The `*_FLIR_*` flights (likely the
+  Matrice 600 Pro with a separate FLIR camera) are IR-only or VIS-only,
+  except Airfield, which is excluded for exactly this misalignment.
+- **IR -> VIS alignment from labels** (`binarized_cv.data.alignment`,
+  `scripts/fit_alignment.py` analysis, `scripts/align_manifest.py` writer).
+  Works in the 640×640 training input space, where identity = the current
+  stretch (median error 23–82 px depending on the sequence, i.e. more than a
+  small person). Box matching per frame (Hungarian under the current
+  estimate, shrinking gate), RANSAC affine on box centres + corners.
+  - **One Mavic 2 Enterprise rig transform** fits MtErie (April, 4K), FHL
+    (Sept) and Baker (Jan): IR → x' = 0.638x + 121.7, y' = 0.903y + 40.6,
+    i.e. thermal covers the middle ~64 % × 90 % of VIS. Cross-sequence error
+    3–8 px. Affine ≈ scale+shift; homography not better (broke on MtErie).
+  - **Residual bumps = time offset**, not geometry: inside a bump all people
+    shift the same way, and pairing IR frame n±1 removes most of it
+    (Baker 780–860: 18 → 5 px; MtErie 150–200: 16 → 7; FHL 0401 850–900:
+    32 → 13). The VIS/IR videos drift by about a frame, sign varies within
+    a sequence; it only shows while the camera moves. A dataset artifact
+    (frames extracted from two videos), so fixed in the data: per-frame
+    offset k ∈ [−2, 2] by dynamic programming (penalty 4 px per change),
+    unlabeled frames follow neighbours. Held-out frames (offsets from their
+    neighbours only), share > 16 px, k=0 → chosen: Baker 14 → 5 %, FHL 0401
+    29 → 18 %, MtErie 0005 25 → 14 %, 0003 28 → 22 %; MtErie 0007 0 → 10 %
+    (few held-out frames). Medians move little (5.5 → 4.9 px on Baker):
+    the 2–5 px floor is label noise.
+  - **Carnation 0023 (val) is zoomed**: own transform has scale 2.4–3.2
+    instead of 0.64, error drifts in waves; segmentation gives 3 transforms,
+    still median 13.5 px, 270/739 frames > 16 px. Carnation 0025 (no IR
+    labels) inherits 0023's main transform, unverified. Open decision: keep
+    Carnation as val or pick another val set.
+  - **TRGB has several rigs**: 1280×800 splits into 3 blocks (≈ 4 px vs
+    ≈ 40 px under one transform, contiguous runs = videos), median 7 px,
+    519 frames > 16 px; 1280×720 (229 frames) doesn't fit well (median 34 px).
+    No frame numbers, so no offset correction for TRGB.
+  - `manifest_aligned.jsonl`: 19,605 records with `ir_transform`,
+    `ir_frame_offset`, `align_err_px`, `align_source`. Checked 9,203,
+    > 16 px 1,185, unchecked 10,402 (no boxes in both modalities; they get
+    the transform of a checked sequence of the same flight, else the rig).
+    The dataset doesn't apply the transform yet.
+- **Misalignment filter: relative, not 16 px.** The 16 px first used was an
+  unfounded rule of thumb. VIS people at 640×640 are small: width p10/p50/p90
+  = 5.7 / 18 / 46.5 px, 45 % narrower than 16 px, so 16 px means "IR blob
+  completely off the person" for half of them. Checked-frame errors: mode
+  2–8 px (label noise, p50 6.3 px), long tail from ~12 px, no clear valley.
+  Rule now: `align_ok = err <= max(6 px, 0.5 × median VIS person width in
+  the frame)` (`--floor-px`, `--width-frac`). 0.5 width = the IR blob still
+  covers at least half the person; the 6 px floor is the noise level below
+  which a tiny person's error says nothing. Drops 1,840 of 9,203 checked
+  (20 %; train 1,103, val 563, test 172) vs 1,185 at 16 px. Most in TRGB
+  (642), Carnation 0023 (462), FHL 0401 (216), Baker (150), MtErie 0007
+  (110). The error counts a VIS person without an IR match as 48 px, so some
+  drops are label inconsistencies (person labeled in one modality only),
+  not misalignment — those frames are dubious for fusion anyway.
+- `data.drop_misaligned_splits: [train]` drops `align_ok: false` records
+  (needs `data.manifest_path=data/processed/manifest_aligned.jsonl`).
+  Train only: filtering hard frames out of val/test flatters the numbers.
+  Unchecked records (no boxes in both modalities) can't be filtered.
+- **Per-flight transforms** (`align_manifest.py --flight-margin 0.05`): each
+  flight gets a candidate fitted on its own non-held-out frames (after the
+  offset correction under the rig); it replaces the rig only if it lowers the
+  flight's held-out misaligned share by >= 5 points. Held-out (median px /
+  misaligned): MtErie rig 5.6 / 36 % vs own 6.3 / 33 % → **stays on rig**;
+  FHL 4.8 / 32 % vs 4.3 / 32 % and Baker 4.5 / 8 % vs 4.3 / 8 % → rig;
+  Carnation 48 / 100 % vs 28 / 88 % → own flight transform (scale 2.4/3.3,
+  zoomed), after which segmentation adds 2 zoom transforms; Carnation 0023
+  held-out with offsets now 13.3 px / 62 % (was 18.6 / 77 %).
+- **MtErie's high misaligned share is not the transform.** Per-sequence own
+  fits don't help consistently either (held-out 0003: 35 → 35 %, 0005:
+  22 → 33 %, 0007: 60 → 50 %, n = 20–40 frames each, too few to trust). It
+  tracks person size: MtErie 0003/0007 people are ~10 px wide (FHL 0401:
+  7 px, 26 %), so the 6 px floor decides, and 14–15 % of their frames sit at
+  6–9 px error on people < 12 px wide; MtErie 0005 (25 px) is 22 %, Baker
+  (28 px) 8 %. At that scale label noise and residual time offset can't be
+  separated from misalignment. Left as is.
+- **Carnation out of val.** Even with its own flight transform plus two zoom
+  transforms, 62 % of Carnation's held-out frames stay misaligned, and 0025
+  (no IR labels) can't be checked at all. New split: val = MtErie (whole
+  flight, 707 frames, 1,766 people; small people, 4K), test = Baker, train =
+  FHL + Hannegan, and Carnation = split `zoom` (2,052 frames, 7,180 people),
+  outside train/val/test, for a later check of how fusion copes with
+  zoomed/misaligned IR. FHL sequence 0401 as val was the alternative
+  (bigger), rejected: same day, place and people as the FHL train sequences.
+  Records: train 14,012 / val 1,031 / test 2,510 / zoom 2,052 (val and test
+  include TRGB's 324 / 330). With RGB labels: train 10,706; minus
+  checked-misaligned frames (`manifest_aligned.jsonl`): 9,862.
+- Note: val is now small (1,031 frames, MtErie people ~10–25 px wide), so the
+  plateau scheduler's val AP50 will be noisier; plateau_min_delta 0.001 may
+  need raising if runs stop on noise.
+- **IR alignment in the dataset** (`data.ir_alignment`, default `none`):
+  `warp` warps IR onto the RGB grid with the record's `ir_transform` (black
+  outside the IR footprint); `crop` crops both to the shared field of view
+  (IR footprint ∩ RGB frame, cropped at full RGB resolution), scales to
+  `img_size`, clips boxes and drops those with < 50 % of their area inside.
+  Records without a transform fall back to `none`. Checked visually on Baker,
+  FHL 0401 and TRGB: IR heat now sits on the labeled people.
+- `crop` keeps 95 % of train boxes (WiSARD 87 %, TRGB 100 %: TRGB's IR
+  footprint covers the whole RGB frame), 98 % val, **88 % test** (Baker 86 %):
+  the Enterprise IR sees only the middle ~64 % × 90 % of VIS. So `crop`
+  changes the test task (fewer, larger people), and its numbers aren't
+  comparable to an RGB-only model on full frames unless that one is cropped
+  too. `warp` keeps every label and the full RGB frame → main setting;
+  `crop` as an ablation (onboard, processing only the overlap is an option).
+- **Defaults switched:** `data.manifest_path` = `manifest_aligned.jsonl`,
+  `data.ir_alignment` = `warp` (with `drop_misaligned_splits: [train]`).
+  `run_pipeline.sh` runs `align_manifest.py` after `build_manifest.py`;
+  README §2 and the cluster rsync line list both manifests. The dataset
+  warns if alignment is on but no record has a transform (old manifest).
+  `ir_alignment=none` reproduces the pre-alignment input.

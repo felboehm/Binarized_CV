@@ -7,7 +7,8 @@ Standalone entry points, not library code:
   already exist and skips download if present. Interactive or command-line
   driven (see `--help` for options).
 - `build_manifest.py` — discovers TRGB/WiSARD RGB+IR pairs under `data/raw`
-  and writes the unified manifest (`data/processed/manifest.jsonl`)
+  and writes the unified manifest (`data/processed/manifest.jsonl`); training
+  reads the aligned copy from `align_manifest.py` by default
 - `train_model.py` — interactive training script with model selection and
   hyperparameter override prompts; alternatives: direct CLI via `python -m binarized_cv.train.train`
 - `eval_with_visuals.py` — comprehensive evaluation script **[NEW]**
@@ -20,6 +21,18 @@ Standalone entry points, not library code:
 - `run_pipeline.sh` — one-command manifest build + train + eval loop against
   real data, with CPU-realistic defaults; see README.md "Usage" or the
   script's own header comment for the environment-variable overrides
+- `collect_results.py` — mean ± std over seeds of the `train_eval.py` result
+  JSONs in `runs/bnn/` (grouped by name minus `_seed<N>`), as a Markdown table
+- `slurm/submit_seeds.sh` — submits the 20-epoch fp32 control / `ib_guided` /
+  `ib_guided` + binary attention comparison as one Slurm job array per config
+  (one task per seed); see README §6
+- `fit_alignment.py` — analysis: how well one fixed IR -> VIS transform per
+  sequence explains the per-modality person labels (held-out errors, residual
+  plots, frame-offset scan, cross-sequence table, overlays) into
+  `runs/alignment/<ts>/`
+- `align_manifest.py` — writes `data/processed/manifest_aligned.jsonl`: per
+  record an IR -> VIS transform, re-paired IR frame (VIS/IR videos drift by
+  ~1 frame) and remaining error (`align_err_px`), plus a summary `.md`
 - `benchmark_latency.py` — inference latency/FPS on target hardware [NOT YET IMPLEMENTED]
 - `measure_power.py` — energy-per-inference measurement harness [NOT YET IMPLEMENTED]
 

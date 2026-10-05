@@ -60,6 +60,8 @@ def evaluate_model(model: torch.nn.Module, cfg: DictConfig, split: str = "test")
         split=split,
         img_size=tuple(cfg.data.img_size),
         target_modality=cfg.data.target_modality,
+        drop_misaligned=split in cfg.data.get("drop_misaligned_splits", []),
+        ir_alignment=cfg.data.get("ir_alignment", "none"),
     )
     loader = DataLoader(
         dataset, batch_size=cfg.data.batch_size, num_workers=cfg.data.num_workers, collate_fn=detection_collate

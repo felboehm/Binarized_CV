@@ -101,11 +101,18 @@ data/raw/trgb/trgb_dataset/{train,val,test}/{RGB_images_*,IR_images_*}/...
 data/raw/wisard/<flight>_{VIS,IR}_*/...
 ```
 
-Then build the manifest that every dataset loader reads from:
+Then build the manifest, and the aligned copy every dataset loader reads from
+by default (`data.manifest_path`): IR -> RGB transform per record, IR frames
+re-paired, misaligned frames marked (see `docs/labnotes.md` 2026-10-05):
 
 ```bash
 python scripts/build_manifest.py --raw-root data/raw --out data/processed/manifest.jsonl
+python scripts/align_manifest.py --raw-root data/raw   # -> data/processed/manifest_aligned.jsonl
 ```
+
+By default IR is warped onto the RGB grid (`data.ir_alignment=warp`); `none`
+restores the old unaligned stretch, `crop` cuts both to the shared field of
+view.
 
 ### 3. Train a model
 
@@ -251,7 +258,7 @@ bash scripts/slurm/setup_env.sh
 #    disks of the login node. The manifest's paths are relative to
 #    data.raw_root.
 rsync -a --mkpath data/raw/ cluster:/global/D1/homes/$USER/bcv-data/raw/
-rsync -a data/processed/manifest.jsonl cluster:<repo>/data/processed/
+rsync -a data/processed/manifest.jsonl data/processed/manifest_aligned.jsonl cluster:<repo>/data/processed/
 rsync -aR runs/checkpoints/yolo26_early_fusion/2026-09-21_21-04-06/epoch_29.pt cluster:<repo>/
 
 # 3. Submit from the repo root (Slurm resolves --output and the repo from there)
@@ -284,6 +291,14 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
   no `--mem`: the GPU nodes report 1 MB of memory to Slurm, so any memory
   request fails. `--propagate=NONE` keeps the login node's 16 GB `ulimit -v`
   out of the job; torch can't allocate memory under it.
+- **Seed arrays:** `FP32=<warm-start .pt> bash scripts/slurm/submit_seeds.sh 1-2` submits the
+  20-epoch comparison (fp32 control, `ib_guided`, `ib_guided` + binary
+  attention) for seeds 1 and 2; `python scripts/collect_results.py` then
+  prints mean ± std per config from `runs/bnn/*.json`. With
+  `SCHEDULE=plateau` each run trains to convergence instead
+  (`train.scheduler=plateau`: LR cut on a val AP50 plateau, stop after the
+  last cut, best-val weights returned). Those runs select on val, so compare
+  their `test_ap50`.
 - **Logs:** progress bars update once a minute (`TQDM_MININTERVAL=60`) to keep
   the logs readable.
 
@@ -291,9 +306,16 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
 
 As of 2026-10-02. Details in `CHECKLIST.md` and `docs/labnotes.md`.
 
-- **Data**: manifest of **18,888 paired RGB/IR records** (4,772 TRGB + 14,116
+- **Data**: manifest of **19,605 paired RGB/IR records** (4,772 TRGB + 14,833
   WiSARD). WiSARD's Airfield flight is excluded (VIS and IR shot from different
-  camera angles).
+  camera angles). Since 2026-10-05 WiSARD is split by flight: train FHL,
+  Hannegan; val MtErie; test Baker; Carnation (zoomed VIS, no fixed IR
+  alignment) is a separate split `zoom` for a later robustness check. Three FHL
+  sequences without VIS labels stay in the manifest but are skipped for RGB
+  supervision (`rgb_labeled: false`). Usable with TRGB: train 10,706 (9,862
+  after dropping misaligned frames with `manifest_aligned.jsonl`), val 1,031,
+  test 2,510, zoom 2,052. **The results below are on the earlier, leaky
+  frame-index split** and need re-running.
 
 - **Fusion models**: the thesis compares several fusion architectures, each in
   fp32 and binarized form:
