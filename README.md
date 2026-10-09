@@ -248,14 +248,17 @@ uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
 
 Scripts in `scripts/slurm/`. They're tuned for the cluster in use (Ubuntu 22.04,
 `a100q`: x86_64 nodes with A100s and driver 615, internet on compute nodes,
-local `/tmp`; the `a40q` nodes are aarch64 and can't run the x86_64 venv),
-but nothing in them is specific to it except the default partition.
+local `/tmp`; the `a40q` nodes (1× A40 each) are aarch64 and need their own
+venv, see below), but nothing in them is specific to it except the default
+partition.
 
 ```bash
 # 1. Code + environment (login node). uv provides Python 3.12; the system
 #    python3 is 3.10 and the cluster's modules stop at 3.9.
 git clone <repo> && cd Binarized_CV
 bash scripts/slurm/setup_env.sh
+#    For a40q (aarch64) also build .venv-aarch64, on one of its nodes:
+srun -p a40q --gres=gpu:1 -c 8 --propagate=NONE bash scripts/slurm/setup_env.sh
 
 # 2. Data, manifest and the fp32 warm-start checkpoint (from the local machine;
 #    data/ and runs/ are gitignored). The dataset goes on the shared BeeGFS
@@ -294,7 +297,7 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
 - **Job arrays:** `{task}` in the arguments becomes `$SLURM_ARRAY_TASK_ID`, for
   seed or region arrays, e.g. `sbatch --array=0-2 … train.seed={task}`.
 - **Resources:** the defaults are `a100q`, 1 GPU, 16 CPUs, 1 day. Override them
-  on the `sbatch` command line (`-p hgx2q`, `-c 32`, `-t 3-00:00:00`). There is
+  on the `sbatch` command line (`-p a40q`, `-c 32`, `-t 3-00:00:00`). There is
   no `--mem`: the GPU nodes report 1 MB of memory to Slurm, so any memory
   request fails. `--propagate=NONE` keeps the login node's 16 GB `ulimit -v`
   out of the job; torch can't allocate memory under it.
@@ -306,6 +309,9 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
   (`train.scheduler=plateau`: LR cut on a val AP50 plateau, stop after the
   last cut, best-val weights returned). Those runs select on val, so compare
   their `test_ap50`.
+- **Architectures:** the job runs `.venv` on x86_64 nodes and `.venv-<arch>`
+  elsewhere (`.venv-aarch64` on `a40q`), both built by `setup_env.sh` on a node
+  of that architecture. It stops before staging if that venv doesn't run.
 - **Logs:** progress bars update once a minute (`TQDM_MININTERVAL=60`) to keep
   the logs readable.
 

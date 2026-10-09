@@ -1061,3 +1061,20 @@ Findings:
   stops if `BCV_DATA` contains no images; no `--delete` when staging;
   `train_eval.py` checks that all train/val/test images exist under
   `data.raw_root` before training (~5 s, fails with count + examples).
+
+## 2026-10-09 (a40q support)
+
+- `a100q` unavailable, so `a40q` (n009–n012, aarch64, 1× A40 48 GB) gets its
+  own environment instead of being excluded. `setup_env.sh` builds
+  `.venv` on x86_64 and `.venv-<arch>` elsewhere, and installs a separate uv
+  to `~/.local/bin/<arch>` when the shared `~/.local/bin/uv` (x86_64) doesn't
+  run. Run it on an a40q node (`srun -p a40q --gres=gpu:1 -c 8
+  --propagate=NONE bash scripts/slurm/setup_env.sh`). It prints
+  `torch.cuda.get_arch_list()` and runs a conv on the GPU, because the aarch64
+  CUDA torch wheels are built mainly for Grace Hopper/Blackwell, and kernels
+  for the A40 (sm_86) need checking. `job.sbatch` picks the venv by
+  `uname -m`; submit with `-p a40q` (or `SBATCH_ARGS="-p a40q"` for
+  `submit_seeds.sh`). Not yet run on the cluster.
+- A40 runs differ from A100 ones in hardware and per-epoch time.
+  Determinism across architectures isn't expected, so compare seeds within
+  one partition, or record the partition per run.
