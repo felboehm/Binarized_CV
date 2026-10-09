@@ -18,7 +18,11 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-METRICS = ("ap50", "ap50_small", "test_ap50", "test_ap50_small")  # val, then test
+# val, then test; *_trgb / *_wisard per source dataset (– in older runs)
+METRICS = (
+    "ap50", "ap50_small", "ap50_trgb", "ap50_wisard",
+    "test_ap50", "test_ap50_small", "test_ap50_trgb", "test_ap50_wisard",
+)
 
 
 def fmt(values: list[float]) -> str:

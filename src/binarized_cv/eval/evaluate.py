@@ -47,9 +47,19 @@ def _convert_targets_to_xyxy_pixels(
     return converted
 
 
+def _ap_metrics(predictions: list[dict], targets: list[dict], small_max_area: float) -> dict[str, float]:
+    return {
+        "ap50": average_precision(predictions, targets, iou_threshold=0.5),
+        "ap50_small": average_precision(predictions, targets, iou_threshold=0.5, area_range=(0.0, small_max_area)),
+    }
+
+
 def evaluate_model(model: torch.nn.Module, cfg: DictConfig, split: str = "test") -> dict[str, float]:
     """AP@0.5 overall and for small objects (APS, `cfg.eval.small_max_area`)
-    on `split`. Shared by this CLI and `scripts/binarization_sweep.py`."""
+    on `split`, plus both per source dataset (`ap50_trgb`, `ap50_small_wisard`,
+    ...): splits mix TRGB and WiSARD, which differ a lot in difficulty.
+    Shared by this CLI, training's per-epoch val and
+    `scripts/binarization_sweep.py`."""
     device = next(model.parameters()).device
     model.eval()
 
@@ -67,24 +77,25 @@ def evaluate_model(model: torch.nn.Module, cfg: DictConfig, split: str = "test")
         dataset, batch_size=cfg.data.batch_size, num_workers=cfg.data.num_workers, collate_fn=detection_collate
     )
 
-    all_predictions, all_targets = [], []
+    all_predictions, all_targets, all_datasets = [], [], []
     with torch.no_grad():
         for batch in loader:
             images = {m: t.to(device) for m, t in batch["images"].items()}
             detections = model(images)
             all_predictions.extend({k: v.cpu() for k, v in d.items()} for d in detections)
             all_targets.extend(batch["targets"])
+            all_datasets.extend(batch["dataset"])
 
     # Convert targets from cxcywh normalized to xyxy pixels to match predictions
     all_targets = _convert_targets_to_xyxy_pixels(all_targets, tuple(cfg.data.img_size))
 
     small_max_area = cfg.eval.get("small_max_area", 32**2)
-    return {
-        "ap50": average_precision(all_predictions, all_targets, iou_threshold=0.5),
-        "ap50_small": average_precision(
-            all_predictions, all_targets, iou_threshold=0.5, area_range=(0.0, small_max_area)
-        ),
-    }
+    metrics = _ap_metrics(all_predictions, all_targets, small_max_area)
+    for name in sorted(set(all_datasets)):
+        keep = [i for i, d in enumerate(all_datasets) if d == name]
+        subset = _ap_metrics([all_predictions[i] for i in keep], [all_targets[i] for i in keep], small_max_area)
+        metrics |= {f"{k}_{name}": v for k, v in subset.items()}
+    return metrics
 
 
 def main(cfg: DictConfig | None = None) -> None:
@@ -98,6 +109,8 @@ def main(cfg: DictConfig | None = None) -> None:
     metrics = evaluate_model(model, cfg)
     print(f"AP@0.5: {metrics['ap50']:.4f}")
     print(f"APS@0.5 (area < {cfg.eval.small_max_area} px²): {metrics['ap50_small']:.4f}")
+    for name in sorted(k.removeprefix("ap50_small_") for k in metrics if k.startswith("ap50_small_")):
+        print(f"  {name}: AP@0.5 {metrics[f'ap50_{name}']:.4f}  APS@0.5 {metrics[f'ap50_small_{name}']:.4f}")
 
 
 if __name__ == "__main__":

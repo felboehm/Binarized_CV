@@ -353,6 +353,7 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
     for epoch in range(start_epoch, cfg.train.epochs):
         model.train()
         progress = tqdm(train_loader, desc=f"epoch {epoch}/{cfg.train.epochs - 1}", unit="batch")
+        loss_sums: dict[str, float] = {}  # per-epoch means for train_epoch/*
         for batch in progress:
             images = {m: t.to(device) for m, t in batch["images"].items()}
             targets = _to_device(batch["targets"], device)
@@ -377,6 +378,9 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
             for name, value in losses.items():
                 writer.add_scalar(f"train/{name}", value.item(), step)
             writer.add_scalar("train/loss_total", loss.item(), step)
+            for name, value in losses.items():
+                loss_sums[name] = loss_sums.get(name, 0.0) + value.item()
+            loss_sums["loss_total"] = loss_sums.get("loss_total", 0.0) + loss.item()
             step += 1
 
             # Named per model (e.g. yolo26: loss_box/loss_cls/loss_dfl) so the bar
@@ -386,7 +390,12 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
                 | {"total": f"{loss.item():.4f}"}
             )
 
-        log.info("epoch %d done (loss=%.4f)", epoch, loss.item())
+        # One point per epoch: the per-batch train/* curves swing with how
+        # many (and how small) people each batch of a few images holds.
+        epoch_means = {name: total / len(train_loader) for name, total in loss_sums.items()}
+        for name, value in epoch_means.items():
+            writer.add_scalar(f"train_epoch/{name}", value, step)
+        log.info("epoch %d done (mean loss=%.4f)", epoch, epoch_means["loss_total"])
         checkpoint_path = checkpoint_dir / f"epoch_{epoch}.pt"
         torch.save(model.state_dict(), checkpoint_path)
 

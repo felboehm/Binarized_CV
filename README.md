@@ -169,6 +169,11 @@ tensorboard --logdir runs/tensorboard/yolo26_early_fusion
 tensorboard --logdir runs/tensorboard
 ```
 
+`train/*` is logged per batch (noisy: raise TensorBoard's smoothing slider);
+`train_epoch/*` holds the same losses averaged over each epoch, and `val/*`
+the per-epoch val metrics when `train.val_each_epoch=true` or
+`train.scheduler=plateau`.
+
 `train.device` defaults to `cuda` and automatically falls back to `cpu` if
 no GPU is available.
 
