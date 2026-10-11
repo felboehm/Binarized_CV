@@ -27,6 +27,7 @@ uv_dir="$HOME/.local/bin"
 uv_ok || export PATH="$uv_dir:$PATH"
 if ! uv_ok; then
     curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$uv_dir" sh
+    hash -r  # bash cached the other uv during the checks above
 fi
 
 # Use the system CA store: uv's bundled roots reject the cluster's TLS

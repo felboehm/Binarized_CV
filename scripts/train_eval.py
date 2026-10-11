@@ -11,7 +11,8 @@ Usage:
     python scripts/train_eval.py RUN_NAME OUT_JSON [hydra overrides...]
 
 RUN_NAME names the checkpoint/TensorBoard directories
-(runs/{checkpoints,tensorboard}/RUN_NAME/<timestamp>/). Example:
+(runs/{checkpoints,tensorboard}/RUN_NAME/<timestamp>/); it doesn't select the
+model, so a model=<name> override is required. Example:
 
     python scripts/train_eval.py yolo26_early_fusion_bnn_ib_guided runs/bnn/ib_guided.json \\
         model=yolo26_early_fusion_bnn \\
@@ -51,6 +52,10 @@ def main() -> None:
     parser.add_argument("out", type=Path, help="where to write the val metrics (JSON)")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides, key=value")
     args = parser.parse_args()
+    # RUN_NAME is only a directory name; without model= the config default
+    # (simple_fusion) trains silently under whatever name was given.
+    if not any(o.startswith("model=") for o in args.overrides):
+        parser.error("pass the model explicitly as a model=<name> override")
 
     logging.basicConfig(level=logging.INFO)
     cfg, _ = train.load_config(args.overrides)
