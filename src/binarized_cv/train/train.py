@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import os
@@ -123,6 +124,44 @@ class PlateauFactor:
         return False, False
 
 
+class ModelEMA:
+    """Exponential moving average of a model's weights (as in ultralytics):
+    after every optimizer step `ema = d * ema + (1 - d) * model` over all
+    floating-point state (parameters and BatchNorm running stats), with
+    `d = decay * (1 - exp(-updates / tau))` ramping up from 0 so the random
+    init doesn't linger in the average. The averaged copy is what gets
+    evaluated, saved as best.pt and returned: it doesn't carry the
+    batch-to-batch jitter of the trained weights, so val AP is less noisy
+    (`docs/labnotes.md` 2026-10-13). For binary layers it averages the
+    latent real-valued weights; binarization still happens in its forward."""
+
+    def __init__(self, model: torch.nn.Module, decay: float = 0.9999, tau: float = 2000.0, updates: int = 0) -> None:
+        self.module = copy.deepcopy(model).eval()
+        for p in self.module.parameters():
+            p.requires_grad_(False)
+        self.decay = decay
+        self.tau = tau
+        self.updates = updates
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        self.updates += 1
+        d = self.decay * (1 - math.exp(-self.updates / self.tau))
+        state = model.state_dict()
+        for name, value in self.module.state_dict().items():
+            if value.dtype.is_floating_point:
+                value.mul_(d).add_(state[name].detach(), alpha=1 - d)
+            else:
+                value.copy_(state[name])
+
+    def state_dict(self) -> dict:
+        return {"module": self.module.state_dict(), "updates": self.updates}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.module.load_state_dict(state["module"])
+        self.updates = state["updates"]
+
+
 def build_scheduler(
     optimizer: torch.optim.Optimizer, train_cfg: DictConfig, steps_per_epoch: int
 ) -> torch.optim.lr_scheduler.LambdaLR | None:
@@ -187,6 +226,7 @@ def save_training_state(
     step: int,
     generator: torch.Generator | None,
     cfg: DictConfig,
+    ema: ModelEMA | None = None,
 ) -> None:
     """Everything `train.resume` needs to continue exactly where `epoch`
     ended. `epoch_N.pt` files stay weights-only, so eval, the sweep and
@@ -194,6 +234,7 @@ def save_training_state(
     torch.save(
         {
             "model": model.state_dict(),
+            "ema": ema.state_dict() if ema is not None else None,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "epoch": epoch,
@@ -222,6 +263,7 @@ def load_training_state(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LambdaLR | None,
     train_loader: DataLoader,
+    ema: ModelEMA | None = None,
 ) -> tuple[int, int]:
     """Load a checkpoint into an already-built (and already binarized) model
     and return `(start_epoch, step)`.
@@ -230,7 +272,8 @@ def load_training_state(
     weights-only `epoch_N.pt` from before full states were saved. For the
     latter, step, LR schedule, annealing progress and shuffle order are
     reconstructed from N; only the optimizer state (Adam moments) and the
-    global RNG state start fresh.
+    global RNG state start fresh, and `ema` (if any) restarts from the
+    loaded weights (with EMA on, `epoch_N.pt` holds the averaged weights).
     """
     path = Path(path)
     state = torch.load(path, map_location="cpu", weights_only=False)  # own file: holds RNG/numpy state
@@ -240,6 +283,12 @@ def load_training_state(
         if scheduler is not None and state["scheduler"] is not None:
             scheduler.load_state_dict(state["scheduler"])
         _set_rng_state(state["rng"], train_loader.generator)
+        if ema is not None:
+            if state.get("ema") is not None:
+                ema.load_state_dict(state["ema"])
+            else:
+                ema.module.load_state_dict(state["model"])
+                ema.updates = state["step"]
         return state["epoch"] + 1, state["step"]
 
     match = re.fullmatch(r"epoch_(\d+)\.pt", path.name)
@@ -248,6 +297,9 @@ def load_training_state(
     model.load_state_dict(state)
     start_epoch = int(match.group(1)) + 1
     step = start_epoch * len(train_loader)
+    if ema is not None:
+        ema.module.load_state_dict(state)
+        ema.updates = step
     if scheduler is not None:
         scheduler.last_epoch = step - 1
         with warnings.catch_warnings():  # "scheduler.step() before optimizer.step()"
@@ -321,13 +373,17 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
     val_each_epoch = plateau is not None or cfg.train.get("val_each_epoch", False)
     plateau_metric = cfg.train.get("plateau_metric", "ap50")
     grad_clip = cfg.train.get("grad_clip")
+    ema_decay = cfg.train.get("ema_decay")
+    ema = ModelEMA(model, ema_decay, cfg.train.get("ema_tau", 2000)) if ema_decay else None
+    # What gets evaluated, saved as epoch_N.pt / best.pt and returned.
+    eval_model = ema.module if ema is not None else model
 
     start_epoch, step = 0, 0
     resume = cfg.train.get("resume")
     if resume is not None:
         # After build_model_from_config, i.e. after the binarization swap, so
         # learned QuantConv2d parameters (thresholds etc.) load as well.
-        start_epoch, step = load_training_state(resume, model, optimizer, scheduler, train_loader)
+        start_epoch, step = load_training_state(resume, model, optimizer, scheduler, train_loader, ema)
         log.info("Resumed from %s at epoch %d (step %d)", resume, start_epoch, step)
 
     # Organize logs and checkpoints by model name with timestamped run directories
@@ -370,6 +426,8 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip or float("inf"))
             optimizer.step()
+            if ema is not None:
+                ema.update(model)
             writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], step)
             if scheduler is not None:
                 scheduler.step()
@@ -397,27 +455,27 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
             writer.add_scalar(f"train_epoch/{name}", value, step)
         log.info("epoch %d done (mean loss=%.4f)", epoch, epoch_means["loss_total"])
         checkpoint_path = checkpoint_dir / f"epoch_{epoch}.pt"
-        torch.save(model.state_dict(), checkpoint_path)
+        torch.save(eval_model.state_dict(), checkpoint_path)
 
         stop = False
         if val_each_epoch:
             from binarized_cv.eval.evaluate import evaluate_model  # evaluate imports this module
 
-            metrics = evaluate_model(model, cfg, split="val")
+            metrics = evaluate_model(eval_model, cfg, split="val")
             for name, value in metrics.items():
                 writer.add_scalar(f"val/{name}", value, step)
             log.info("epoch %d val: %s", epoch, " ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
             if plateau is not None:
                 improved, stop = plateau.update(metrics[plateau_metric])
                 if improved:
-                    torch.save(model.state_dict(), checkpoint_dir / "best.pt")
+                    torch.save(eval_model.state_dict(), checkpoint_dir / "best.pt")
                 log.info(
                     "plateau: best %s=%.4f, %d/%d evals without improvement, LR scale %g (%d/%d cuts)",
                     plateau_metric, plateau.best, plateau.bad_evals, plateau.patience,
                     plateau.scale, plateau.drops, plateau.max_drops,
                 )
         # After the plateau update, so a resume continues with its state.
-        save_training_state(checkpoint_dir / "last.pt", model, optimizer, scheduler, epoch, step, generator, cfg)
+        save_training_state(checkpoint_dir / "last.pt", model, optimizer, scheduler, epoch, step, generator, cfg, ema)
         if stop:
             log.info("converged: no %s improvement after the last LR cut, stopping after epoch %d", plateau_metric, epoch)
             break
@@ -427,9 +485,9 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
 
     writer.close()
     if plateau is not None and (checkpoint_dir / "best.pt").exists():
-        model.load_state_dict(torch.load(checkpoint_dir / "best.pt", map_location=device))
+        eval_model.load_state_dict(torch.load(checkpoint_dir / "best.pt", map_location=device))
         log.info("returning best.pt (val %s=%.4f)", plateau_metric, plateau.best)
-    return model
+    return eval_model
 
 
 if __name__ == "__main__":

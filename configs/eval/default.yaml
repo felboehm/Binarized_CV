@@ -2,3 +2,8 @@ checkpoint_path: null
 # Upper box area (pixels², at model input size) for the small-object AP
 # (APS). 1024 = 32², the COCO definition the YOLO26 paper reports APS with.
 small_max_area: 1024
+# Detection score threshold during evaluation, overriding the models' own
+# conf_thresh (0.25, for deployment/visualisation). AP needs the low-score
+# detections too (COCO/ultralytics evaluate at 0.001); 0.25 underestimated
+# test AP50 by 0.05-0.14 (docs/labnotes.md 2026-10-13). null = model's own.
+conf_thresh: 0.001

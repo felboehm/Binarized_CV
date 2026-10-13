@@ -53,3 +53,16 @@ def test_area_range_ignores_out_of_range_ground_truth():
     # With no small GT at all, APS is 0 by convention.
     only_large = [{"boxes": torch.tensor([large_gt]), "labels": torch.tensor([0])}]
     assert average_precision(predictions, only_large, area_range=(0, 32**2)) == 0.0
+
+
+def test_score_threshold_overrides_and_restores_conf_thresh():
+    from binarized_cv.eval.evaluate import _score_threshold
+
+    head = torch.nn.Module()
+    head.conf_thresh = 0.25
+    model = torch.nn.Sequential(head)
+    with _score_threshold(model, 0.001):
+        assert head.conf_thresh == 0.001
+    assert head.conf_thresh == 0.25
+    with _score_threshold(model, None):
+        assert head.conf_thresh == 0.25

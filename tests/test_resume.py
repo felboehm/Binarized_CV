@@ -4,6 +4,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 
 from binarized_cv.train.train import (
+    ModelEMA,
     _skip_shuffles,
     build_scheduler,
     load_training_state,
@@ -23,7 +24,7 @@ def _setup(seed: int = 0):
     return model, optimizer, scheduler, loader
 
 
-def _train(model, optimizer, scheduler, loader, epochs) -> list[float]:
+def _train(model, optimizer, scheduler, loader, epochs, ema=None) -> list[float]:
     lrs = []
     for _ in range(epochs):
         for x, y in loader:
@@ -31,6 +32,8 @@ def _train(model, optimizer, scheduler, loader, epochs) -> list[float]:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if ema is not None:
+                ema.update(model)
             lrs.append(optimizer.param_groups[0]["lr"])
             scheduler.step()
     return lrs
@@ -49,6 +52,26 @@ def test_full_state_resume_matches_uninterrupted_run(tmp_path):
     assert (start_epoch, step) == (2, 2 * len(loader))
     _train(*resumed, epochs=2)
     assert torch.equal(resumed[0].weight, reference[0].weight)
+
+
+def test_full_state_resume_restores_ema(tmp_path):
+    reference = _setup()
+    reference_ema = ModelEMA(reference[0], decay=0.9, tau=2)
+    _train(*reference, epochs=4, ema=reference_ema)
+
+    model, optimizer, scheduler, loader = _setup()
+    ema = ModelEMA(model, decay=0.9, tau=2)
+    _train(model, optimizer, scheduler, loader, epochs=2, ema=ema)
+    save_training_state(
+        tmp_path / "last.pt", model, optimizer, scheduler, 1, 2 * len(loader), loader.generator, TRAIN_CFG, ema
+    )
+
+    resumed = _setup(seed=1)
+    resumed_ema = ModelEMA(resumed[0], decay=0.9, tau=2)
+    load_training_state(tmp_path / "last.pt", *resumed[:3], resumed[3], resumed_ema)
+    assert resumed_ema.updates == 2 * len(loader)
+    _train(*resumed, epochs=2, ema=resumed_ema)
+    assert torch.equal(resumed_ema.module.weight, reference_ema.module.weight)
 
 
 def test_weights_only_resume_reconstructs_step_lr_and_shuffle(tmp_path):

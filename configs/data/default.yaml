@@ -5,10 +5,11 @@ manifest_path: data/processed/manifest_aligned.jsonl
 img_size: [640, 640]
 target_modality: rgb
 # Splits in which records with checked-misaligned IR (align_ok: false, only in
-# manifest_aligned.jsonl from scripts/align_manifest.py) are dropped. Train
-# only by default: dropping hard frames from val/test would flatter the
-# evaluation and make it incomparable.
-drop_misaligned_splits: [train]
+# manifest_aligned.jsonl from scripts/align_manifest.py) are dropped. None by
+# default: dropping them from train cost ~0.03 val / ~0.06 test-TRGB AP50 in
+# the IR alignment ablation (docs/labnotes.md 2026-10-13), and dropping hard
+# frames from val/test would flatter the evaluation and make it incomparable.
+drop_misaligned_splits: []
 # How IR is placed relative to RGB, using the per-record ir_transform of
 # manifest_aligned.jsonl (records without one fall back to none):
 # none (stretch both to img_size, unaligned) | warp (IR warped onto the RGB

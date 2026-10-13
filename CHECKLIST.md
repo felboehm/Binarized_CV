@@ -74,10 +74,11 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
 - [x] Set up reproducibility basics: seed control (`train.seed`, default 0,
       also seeds the DataLoader shuffle), `train.deterministic` flag, Hydra
       YAML configs per experiment. Runs before 2026-10-02 are unseeded
-- [ ] Decide compute resources: **Slurm cluster** (Ubuntu 22.04; `a100q`
-      2×2 A100 x86_64 as default, `a40q` 4× A40 is aarch64 and unused;
-      14-day limit; driver 615), set up
-      2026-10-03: `scripts/slurm/` + README §6. Not yet run there. Dataset
+- [x] Decide compute resources: **Slurm cluster** (Ubuntu 22.04; `a100q`
+      2×2 A100 x86_64 as default, `a40q` 4× A40 aarch64 with its own
+      `.venv-aarch64`; 14-day limit; driver 615), set up
+      2026-10-03: `scripts/slurm/` + README §6. Jobs run on both partitions
+      (`a100q` since 2026-10-05, `a40q` since 2026-10-09). Dataset
       lives on the shared BeeGFS, `/global/D1/homes/$USER/bcv-data/raw`, and
       is staged to node-local `/tmp` per job; code, venv and `runs/` in `~`. Local
       RTX 2050 stays for development (~10–13.5 min/epoch)
@@ -169,10 +170,16 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       fusion point**, compared against each other (and binarized the same
       way) rather than a single chosen architecture:
   - [x] **Early fusion** (`yolo26_early_fusion`): IR resized to RGB size,
-        4-channel input, single YOLO26. Implemented and trained (30 epochs:
-        AP50 0.726 test / 0.673 val); the current fp32 baseline and the
-        checkpoint all binarization sweeps start from. Expected to be limited
-        by the RGB/IR misregistration — a result, not a defect.
+        4-channel input, single YOLO26. Implemented and trained. On the
+        flight-wise split with warped IR (plateau, seed 0): test AP50 0.207
+        vs 0.101 RGB-only and 0.128 `ms_yolov8` (`docs/labnotes.md`
+        2026-10-11). The earlier 0.726 test / 0.673 val came from the leaky
+        split and are void. IR is now warped onto the RGB grid with a
+        label-fitted transform (`data.ir_alignment=warp`). IR alignment
+        ablation (3 seeds, `docs/labnotes.md` 2026-10-13): warp beats no
+        alignment (test AP50 0.250 vs 0.222, val 0.280 vs 0.219); also
+        dropping misaligned train frames is worse (test 0.172, val 0.249).
+        Default switched to warp only (`drop_misaligned_splits: []`).
   - [ ] **Mid fusion** (`yolo26_midfusion`): separate RGB and IR backbones,
         merged at feature level via `ConcatFusion`, shared neck/head. RGB and
         IR sub-models and the fusion module exist, but the forward pass is
@@ -219,10 +226,11 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       already take
 - [ ] Reproduce or closely match published baseline metrics (from the TRGB
       or WiSARD papers, or a reimplemented VTSaR-style method) before
-      touching binarization, so later deltas are trustworthy — 5-epoch run
-      complete (loss converged 7.6×), but AP@0.5=0 on test (too few epochs
-      for convergence). Extended runs (20-50 epochs) needed for real accuracy
-      baseline. See `docs/labnotes.md` 2026-09-16.
+      touching binarization, so later deltas are trustworthy. First
+      flight-wise-split baselines exist (plateau, seed 0, see §4 above), but
+      the plateau rule likely stopped them early on the noisy val set
+      (`docs/labnotes.md` 2026-10-11); needs a checked stopping rule and
+      seeds before it serves as the BNN warm start.
 - [ ] Establish baseline inference benchmarking harness (latency, FPS) on
       target hardware
 
@@ -259,10 +267,11 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
 - [ ] Settle the remaining region-map questions: seeds for attention /
       neck_deep / backbone_deep (~0.03 AP apart, within noise), stem at 8-bit,
       and repeat the sweep on the mid-fusion model once it exists
-- [ ] Full-length `ib_guided` training (20 epochs, cosine): stopped run
-      resumed from `epoch_16.pt` on 2026-10-03; fp32 control and
-      `ib_guided` + binary attention on the same schedule queued after it
-      (`runs/bnn/queue_2026-10-03.sh`). Still to do: evaluate and write up
+- [ ] Full-length `ib_guided` training: the 20-epoch run (val AP50 0.669)
+      was on the leaky split and warm-started from a leaky checkpoint, so it
+      is void. To redo from the new fp32 baseline: fp32 control /
+      `ib_guided` / `ib_guided` + binary attention over seeds
+      (`scripts/slurm/submit_seeds.sh`), and the per-region sweep
 - [ ] Knowledge distillation from the fp32 teacher (not implemented yet)
 - [ ] Ablations the plan calls for: stochastic vs deterministic binarization;
       annealed vs fixed surrogate; adam vs sgd for binarized layers

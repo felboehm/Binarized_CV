@@ -1078,3 +1078,139 @@ Findings:
 - A40 runs differ from A100 ones in hardware and per-epoch time.
   Determinism across architectures isn't expected, so compare seeds within
   one partition, or record the partition per run.
+
+## 2026-10-11 (first baselines on the flight-wise split; ablations rerun)
+
+- **fp32 baselines on the new split** (Oct 5, `a100q` n014, warp + drop
+  misaligned train frames, `train.scheduler=plateau`, 100-epoch cap, 1 warmup
+  epoch, seed 0; `runs/slurm/*_142527{4,5,6}.out`, metrics in
+  `runs/baseline/*_warp_plateau_seed0.json` on the cluster). Plateau runs
+  return best-val weights, so test is the fair column:
+
+  | model | stopped | val AP50 | val APS50 | test AP50 | test APS50 |
+  |---|---|---|---|---|---|
+  | `yolo26` (RGB) | ep 16 | 0.177 | 0.123 | 0.101 | 0.015 |
+  | `ms_yolov8` | ep 16 | 0.297 | 0.215 | 0.128 | 0.077 |
+  | `yolo26_early_fusion` | ep 23 | 0.240 | 0.152 | **0.207** | 0.026 |
+
+  - About a third of the leaky-split numbers (0.726 test / 0.673 val), as
+    expected once val/test flights are unseen. Fusion beats RGB-only on both
+    splits; `ms_yolov8` wins val but drops to 0.128 on test, so the val
+    ranking doesn't carry over. Test APS50 is very low for all three.
+  - **The plateau stops look premature.** Val AP50 jumps ±0.04 between
+    consecutive epochs (early fusion: 0.157 → 0.124 → 0.172 at epochs 3–5)
+    on the 1,031-frame val set, so "no 0.001 gain in 3 epochs" triggers on
+    noise (the risk noted on 2026-10-05). Consider raising
+    `plateau_min_delta` / `plateau_patience` before treating these as
+    converged.
+  - The early fusion `best.pt` of this run is the candidate warm start for
+    the BNN runs (`FP32=` in `submit_seeds.sh`).
+- **Alignment ablations of 2026-10-09 are void.** Jobs 1429202/1429205/1429206
+  (`a40q`; A: raw manifest, `ir_alignment=none`, no filter; B: warp, no
+  filter; C: warp + filter) passed no `model=`, so they trained the config
+  default `simple_fusion` (toy CNN) under `yolo26_early_fusion_*` run names,
+  with the default schedule (10 epochs, constant LR). Telltales: mean loss
+  0.43 → 0.10 instead of YOLO's ~6–18, ~2 min/epoch. Val AP50 0.016 / 0.039 /
+  0.032, WiSARD ≤ 0.03: not usable. Jobs 1429203/1429204 were cancelled
+  during staging and resubmitted as 1429205/1429206.
+  - "A split" didn't test the split either: `manifest.jsonl` is flight-wise
+    since 2026-10-05, so A vs B is alignment only (warp + IR frame
+    re-pairing). Renamed `A_noalign`. The leaky split would need
+    `manifest_frame_split_2026-10-05.jsonl`, whose val/test differ.
+  - To rerun (not yet submitted): `model=yolo26_early_fusion`, same
+    plateau settings as the baseline, seeds 0–2, all on `a40q` (README §6
+    has the commands); results to
+    `runs/ablation/`, summarise with
+    `scripts/collect_results.py 'runs/ablation/*_seed*.json'`.
+- **`train_eval.py` now requires a `model=` override** and exits with a usage
+  error otherwise: RUN_NAME only names the directories. The check runs after
+  `job.sbatch` has staged the data, so a missing `model=` still costs the
+  staging time, but not a training run.
+- **`a40q` works.** The aarch64 `.venv-aarch64` ran these jobs on n009–n011
+  (A40). `setup_env.sh` gained a `hash -r` after installing the aarch64 uv:
+  bash had cached the path of the x86_64 uv from the checks before.
+
+## 2026-10-13 (IR alignment ablation results)
+
+- **IR alignment ablation for early fusion, done** (`a40q`,
+  `model=yolo26_early_fusion`, plateau schedule as the 2026-10-11 baseline,
+  seeds 0–2; metrics in `runs/ablation/{A_noalign,B_warp,C_filter}_seed*.json`
+  on the cluster). Jobs: A 1429566/1429860/1429565, B 1429863/1429901/1429861,
+  C 1430040/1430043/1429862 (seed 0/1/2). All 9 converged by the plateau rule
+  after epochs 21–32. The first B/C array (1429568–1429574, 2026-10-11) died
+  in staging (rsync broken pipe) and was resubmitted; A seed 1 (1429567) was
+  rerun as 1429860. Mean ± std over 3 seeds:
+
+  | arm | val AP50 | val APS50 | val WiSARD | test AP50 | test TRGB | test WiSARD | test APS50 |
+  |---|---|---|---|---|---|---|---|
+  | A: no alignment | 0.219 ± .013 | 0.159 ± .007 | 0.021 ± .008 | 0.222 ± .031 | 0.593 ± .034 | 0.171 ± .036 | 0.059 ± .055 |
+  | B: warp | **0.280 ± .017** | **0.177 ± .013** | 0.047 ± .016 | **0.250 ± .070** | **0.771 ± .023** | **0.184 ± .072** | 0.092 ± .068 |
+  | C: warp + drop misaligned train | 0.249 ± .013 | 0.152 ± .017 | **0.073 ± .012** | 0.172 ± .080 | 0.711 ± .017 | 0.106 ± .090 | 0.111 ± .109 |
+
+  - **Warping helps.** A → B: +0.06 val AP50 and +0.18 test AP50 on TRGB,
+    seed spreads well separated.
+  - **Dropping misaligned train frames does not.** B → C: −0.03 val AP50,
+    −0.06 test AP50 on TRGB (tight spreads). C's only gain is val WiSARD
+    (0.073 vs 0.047), which does not carry over to test.
+  - **Test WiSARD (Baker) is too noisy to rank arms** (± 0.07–0.09). C's low
+    test mean is mostly seed 2: test WiSARD 0.003 against val WiSARD 0.077,
+    which looks like a degenerate run rather than an effect. Check that
+    checkpoint before quoting C's test number.
+  - **Test APS50 swings 0.02–0.23 across seeds** and ranks nothing. C seed 1
+    has test APS50 (0.235) above test AP50 (0.216); possible, but worth a look
+    at the small-object eval.
+  - The 2026-10-11 early fusion baseline (C settings, seed 0, test 0.207)
+    sits inside C's spread.
+  - **Consequence:** B (`data.ir_alignment=warp`,
+    `data.drop_misaligned_splits=[]`) is the better default. Defaults are not
+    changed yet; switching means the fp32 baseline / BNN warm start should be
+    retrained under B.
+  - `runs/ablation/A_split_seed0.json` on the cluster is the void 2026-10-09
+    toy-model run; it matches the `*_seed*.json` glob, so exclude or delete it
+    before running `collect_results.py`.
+- **All AP so far was computed at score threshold 0.25.** The detectors
+  drop detections below `conf_thresh=0.25` and `evaluate_model` used them as
+  they came, so the precision/recall curve was cut short (COCO/ultralytics
+  evaluate at 0.001). Found while checking C seed 2: its `best.pt` makes 0.2
+  detections per Baker image against 2.8 GT (recall 0.013). Re-evaluated the
+  9 ablation `best.pt` on test from one pass at 0.001 (`runs/diag/` on the
+  cluster, jobs 1430450/1430451; the 0.25 column reproduces the JSONs
+  exactly). Test AP50, mean ± std over 3 seeds:
+
+  | arm | all @0.25 | all @0.001 | TRGB @0.001 | WiSARD @0.001 | APS50 @0.001 |
+  |---|---|---|---|---|---|
+  | A: no alignment | 0.222 ± .031 | 0.339 ± .040 | 0.667 ± .045 | 0.296 ± .048 | 0.131 ± .102 |
+  | B: warp | 0.250 ± .070 | **0.381 ± .078** | **0.820 ± .026** | **0.342 ± .080** | 0.180 ± .098 |
+  | C: warp + drop misaligned train | 0.172 ± .080 | 0.289 ± .142 | 0.776 ± .016 | 0.237 ± .164 | 0.200 ± .157 |
+
+  - +0.05–0.14 AP50 everywhere; the ranking B > A > C and the ablation
+    conclusion stand.
+  - The threshold does **not** explain the seed spread: C seed 2 stays at
+    0.049 test WiSARD (TRGB 0.790) and B's WiSARD spread stays ± 0.08. How
+    well a seed/checkpoint transfers to the unseen Baker flight genuinely
+    varies; C seed 2 fails there.
+  - Fix: `eval.conf_thresh` (default 0.001) overrides the models' threshold
+    during `evaluate_model` only (training val, `train_eval.py`, the sweep);
+    the models keep 0.25 for deployment. Every earlier number in this log,
+    `README.md` and `docs/binarization_findings.md` was taken at 0.25 and is
+    an underestimate (comparisons within one table stay valid).
+  - APS50 > AP50 (C seed 1) is not a bug: size-bucket AP ignores
+    out-of-range detections, so large false positives don't count against
+    APS.
+- **Plateau rule vs val noise** (per-epoch val AP50 of the 9 ablation runs):
+  at full LR val AP50 jumps ± 0.03–0.06 between epochs, after the first
+  cut ~± 0.01 (median residual sd 0.008), at 1% LR it is flat (± 0.005).
+  - The final stop is fine: B and A gain ≤ 0.008 val between best epoch and
+    the mean of the last 5.
+  - The noise hits the first LR cut (triggered by dips at full LR, epochs
+    10–18) and `best.pt`: all three C runs pick a single-epoch spike at
+    epoch 16 (C seed 2: 0.238 vs neighbours ~0.21), so C's val is inflated
+    by ~0.02.
+  - Raising `plateau_min_delta` (suggested on 2026-10-11) would make it
+    worse: a stricter "improvement" cuts the LR *earlier*. Left at 0.001.
+- **Weight EMA added** (`ModelEMA` in `train.py`, ultralytics-style, on by
+  default: `train.ema_decay=0.9999`, `train.ema_tau=2000`, `null` = off).
+  Val, the plateau rule, `epoch_N.pt`, `best.pt` and the returned model use
+  the averaged weights; `last.pt` stores the average for exact resumes. Aimed
+  at the jitter above; its effect on val noise and test spread is untested.
+- **Data default switched to ablation B**: `drop_misaligned_splits: []`.

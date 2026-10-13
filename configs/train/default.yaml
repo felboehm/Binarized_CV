@@ -21,6 +21,12 @@ plateau_min_delta: 0.001
 # Evaluate on val after every epoch (val/* in TensorBoard). Always on for
 # scheduler=plateau.
 val_each_epoch: false
+# Exponential moving average of the weights (ModelEMA in train.py, as in
+# ultralytics): evaluation, epoch_N.pt, best.pt and the returned model use the
+# averaged weights, which are less noisy than the trained ones. The decay ramps
+# up as ema_decay * (1 - exp(-step / ema_tau)). null = off.
+ema_decay: 0.9999
+ema_tau: 2000
 # Clip total grad norm (null = off). BNN training is unstable; the norm is
 # logged to TensorBoard either way.
 grad_clip: null

@@ -237,7 +237,9 @@ python scripts/estimate_layer_mi.py --model yolo26_early_fusion \
 
 For queued or batch (e.g. Slurm) runs, `scripts/train_eval.py RUN_NAME OUT_JSON
 [overrides...]` trains, then evaluates on val and writes the metrics to
-`OUT_JSON`. A stopped run continues with `train.resume=<run dir>/last.pt`.
+`OUT_JSON`. `RUN_NAME` only names the output directories, so the model must
+be given as a `model=<name>` override (the script refuses to run without
+one). A stopped run continues with `train.resume=<run dir>/last.pt`.
 
 The quantization is simulated in PyTorch. It measures accuracy, not speed.
 
@@ -315,9 +317,33 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
 - **Logs:** progress bars update once a minute (`TQDM_MININTERVAL=60`) to keep
   the logs readable.
 
+IR alignment ablation for early fusion (3 seeds per arm, one partition, same
+schedule as the fp32 baseline; `docs/labnotes.md` 2026-10-11):
+
+```bash
+COMMON="model=yolo26_early_fusion train.epochs=100 train.scheduler=plateau train.warmup_epochs=1 train.seed={task}"
+
+# A: no IR alignment (raw manifest: no warp, no IR frame re-pairing, no filter)
+sbatch -J ablA_noalign -p a40q --array=0-2 scripts/slurm/job.sbatch scripts/train_eval.py \
+    yolo26_early_fusion_ablA_noalign_seed{task} runs/ablation/A_noalign_seed{task}.json \
+    $COMMON data.manifest_path=data/processed/manifest.jsonl data.ir_alignment=none "data.drop_misaligned_splits=[]"
+
+# B: warp, keep misaligned train frames
+sbatch -J ablB_warp -p a40q --array=0-2 scripts/slurm/job.sbatch scripts/train_eval.py \
+    yolo26_early_fusion_ablB_warp_seed{task} runs/ablation/B_warp_seed{task}.json \
+    $COMMON data.ir_alignment=warp "data.drop_misaligned_splits=[]"
+
+# C: warp + drop misaligned train frames (the default until 2026-10-13)
+sbatch -J ablC_filter -p a40q --array=0-2 scripts/slurm/job.sbatch scripts/train_eval.py \
+    yolo26_early_fusion_ablC_filter_seed{task} runs/ablation/C_filter_seed{task}.json \
+    $COMMON data.ir_alignment=warp "data.drop_misaligned_splits=[train]"
+
+python scripts/collect_results.py 'runs/ablation/*_seed*.json'   # compare test_ap50
+```
+
 ## Status
 
-As of 2026-10-02. Details in `CHECKLIST.md` and `docs/labnotes.md`.
+As of 2026-10-13. Details in `CHECKLIST.md` and `docs/labnotes.md`.
 
 - **Data**: manifest of **19,605 paired RGB/IR records** (4,772 TRGB + 14,833
   WiSARD). WiSARD's Airfield flight is excluded (VIS and IR shot from different
@@ -327,25 +353,52 @@ As of 2026-10-02. Details in `CHECKLIST.md` and `docs/labnotes.md`.
   sequences without VIS labels stay in the manifest but are skipped for RGB
   supervision (`rgb_labeled: false`). Usable with TRGB: train 10,706 (9,862
   after dropping misaligned frames with `manifest_aligned.jsonl`), val 1,031,
-  test 2,510, zoom 2,052. **The results below are on the earlier, leaky
-  frame-index split** and need re-running.
+  test 2,510, zoom 2,052. IR is warped onto the RGB grid by default (alignment
+  fitted from the labels, `manifest_aligned.jsonl`); misaligned train frames
+  are kept by default since 2026-10-13.
+
+- **IR alignment ablation** (early fusion, 3 seeds, test AP50 mean ± std at
+  eval score threshold 0.001; `docs/labnotes.md` 2026-10-13):
+
+  | arm | val AP50 | test AP50 | test TRGB | test WiSARD |
+  |---|---|---|---|---|
+  | A: no alignment | 0.219 ± .013 | 0.339 ± .040 | 0.667 | 0.296 |
+  | B: warp | **0.280 ± .017** | **0.381 ± .078** | **0.820** | **0.342** |
+  | C: warp + drop misaligned train | 0.249 ± .013 | 0.289 ± .142 | 0.776 | 0.237 |
+
+  Warping clearly helps; dropping misaligned train frames does not. Test
+  WiSARD (one flight, Baker) varies ± 0.08–0.16 between seeds, so TRGB and
+  val carry the ranking. B is the default since 2026-10-13. (Val AP50 above
+  is from training, at the old 0.25 threshold.)
 
 - **Fusion models**: the thesis compares several fusion architectures, each in
   fp32 and binarized form:
-  - `yolo26_early_fusion` (4-channel input) — **trained, 30 epochs**. This is
-    the current baseline.
+  - `yolo26_early_fusion` (4-channel input) — **trained**. This is the
+    current baseline.
   - `yolo26_midfusion` (feature-level fusion) — **in progress**, forward pass
     still RGB-only.
   - `yolo26` (RGB only) is the no-fusion reference, `ms_yolov8` (Balla &
     Shrestha, EUSIPCO 2025) the first external comparison model.
 
-- **Early fusion fp32 baseline** (30 epochs, `scripts/eval_with_visuals.py`, test
-  split): AP@0.5 **0.726**, AP@0.75 0.381, Precision@0.5 0.798, Recall@0.5
-  0.773. On the val split (`evaluate.py`): AP50 0.673, APS50 (< 32² px) 0.622.
+- **fp32 baselines on the flight-wise split** (warp, plateau schedule, seed 0,
+  one run each; best-val weights, so compare test):
+
+  | model | test AP50 | test APS50 | val AP50 |
+  |---|---|---|---|
+  | `yolo26` (RGB only) | 0.101 | 0.015 | 0.177 |
+  | `ms_yolov8` | 0.128 | 0.077 | 0.297 |
+  | `yolo26_early_fusion` | **0.207** | 0.026 | 0.240 |
+
+  These were evaluated at score threshold 0.25, which underestimates AP by
+  0.05–0.14 (fixed since 2026-10-13: `eval.conf_thresh=0.001`); the ranking
+  holds. Fusion helps over RGB-only. The plateau scheduler probably stopped these
+  runs early (val AP50 is noisy on the small val set), and there are no seed
+  repeats yet. The earlier 0.726 test / 0.673 val came from the leaky
+  frame-index split and are void (`docs/labnotes.md` 2026-10-05, 2026-10-11).
 
 - **Binarization**: implemented (simulated in PyTorch) and partly tested on the
-  early fusion model. A one-region-at-a-time sweep with 3 fine-tune epochs (val)
-  shows:
+  early fusion model. A one-region-at-a-time sweep with 3 fine-tune epochs (val,
+  on the leaky split, so to be repeated) shows:
   - the deep backbone, deep neck and attention convs can go binary for
     ≤ 0.08 AP50 each (~85% of conv weights);
   - the P3 path must stay at 8-bit, since binary P3 loses ~95% of small-object AP;
@@ -355,9 +408,13 @@ As of 2026-10-02. Details in `CHECKLIST.md` and `docs/labnotes.md`.
   `ib_guided` map. See `docs/binarization_findings.md`.
 
 **Next**:
-1. Full-state checkpoints and resume.
-2. Finish the 20-epoch `ib_guided` run, plus an fp32 control on the same
-   schedule and an `ib_guided` + binary attention variant.
+1. Retrain the early fusion fp32 baseline (3 seeds) with the new defaults
+   of 2026-10-13: warp without the misaligned-frame filter, weight EMA, eval
+   threshold 0.001. Check whether EMA steadies val AP50 and the test WiSARD
+   spread.
+2. From the new fp32 baseline: re-run the binarization sweep and the
+   fp32 control / `ib_guided` / `ib_guided` + binary attention seed
+   comparison (`submit_seeds.sh`).
 3. Wire up the mid-fusion forward pass.
 4. A real-kernel latency benchmark on the target CPU; nothing here measures
    speed yet.

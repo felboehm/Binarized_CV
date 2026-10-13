@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 
 import torch
 from hydra import compose, initialize
@@ -47,6 +48,24 @@ def _convert_targets_to_xyxy_pixels(
     return converted
 
 
+@contextmanager
+def _score_threshold(model: torch.nn.Module, conf_thresh: float | None):
+    """Temporarily set the detection score threshold (`conf_thresh` of the
+    model or its head) for evaluation. AP needs (almost) every detection:
+    a deployment threshold like the models' 0.25 cuts the precision/recall
+    curve short and underestimated test AP50 by 0.05–0.14 (docs/labnotes.md
+    2026-10-13). `None` keeps the model's own threshold."""
+    modules = [m for m in model.modules() if hasattr(m, "conf_thresh")] if conf_thresh is not None else []
+    saved = [m.conf_thresh for m in modules]
+    for m in modules:
+        m.conf_thresh = conf_thresh
+    try:
+        yield
+    finally:
+        for m, value in zip(modules, saved):
+            m.conf_thresh = value
+
+
 def _ap_metrics(predictions: list[dict], targets: list[dict], small_max_area: float) -> dict[str, float]:
     return {
         "ap50": average_precision(predictions, targets, iou_threshold=0.5),
@@ -78,7 +97,7 @@ def evaluate_model(model: torch.nn.Module, cfg: DictConfig, split: str = "test")
     )
 
     all_predictions, all_targets, all_datasets = [], [], []
-    with torch.no_grad():
+    with torch.no_grad(), _score_threshold(model, cfg.eval.get("conf_thresh")):
         for batch in loader:
             images = {m: t.to(device) for m, t in batch["images"].items()}
             detections = model(images)
