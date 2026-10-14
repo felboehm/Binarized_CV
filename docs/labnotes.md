@@ -1214,3 +1214,32 @@ Findings:
   the averaged weights; `last.pt` stores the average for exact resumes. Aimed
   at the jitter above; its effect on val noise and test spread is untested.
 - **Data default switched to ablation B**: `drop_misaligned_splits: []`.
+
+## 2026-10-14 (EMA runs: short plateau runs, cluster failures)
+
+- **EMA baseline runs** (job 1430477, early fusion, plateau, default data =
+  ablation B, EMA 0.9999 / tau 2000): seed 0 finished, seeds 1 and 2 failed
+  (see below).
+  - Val is much smoother than in B (± 0.01–0.015 vs ± 0.03–0.06 between
+    epochs at full LR; B's per-epoch val was still at score threshold 0.25).
+  - Seed 0 test AP50 (@0.001) 0.423, inside B's 0.298 / 0.394 / 0.452, but
+    test TRGB 0.656 against 0.80–0.85 for every B seed. One seed; recheck
+    with the reruns.
+- **The plateau rule stopped seed 0 after 20 epochs** (B: 25–33). Cause: the
+  EMA time constant `1 / (1 - 0.9999 (1 - exp(-u/2000)))` was ~4 epochs at
+  the first LR cut (epoch 13) and ~7 at the stop (epoch 19), against a
+  patience of 3. Val judged weights mostly from before each cut, so it stayed
+  flat (0.316–0.317) and the rule cut and stopped. Early on the ramp kept the
+  window below one epoch until ~epoch 10, so the EMA did little where the val
+  noise was.
+  - **Fix:** `train.ema_decay=0.999`, `train.ema_tau=500`: time constant
+    ~1000 steps (~0.75 epoch), reached by ~epoch 3. A long, SWA-like average
+    (0.9999 with a patience of ~8) would be a separate experiment.
+- **Seed 2 failed at epoch 15 (n009):** the staged data in
+  `/tmp/feboe/bcv-data` and the DataLoader's multiprocessing sockets in
+  `/tmp` were deleted mid-run. Image reads failed in all workers, ultralytics'
+  PIL patch tried to `pip install pi-heif`, and the DataLoader died with
+  `FileNotFoundError`. Not a Slurm epilog (none configured) or tmpfiles
+  (boot-only); no other job was on the node. Cause unknown, ask the admins.
+- **Seed 1 hung on n010:** stuck in the first backward pass for 22 h
+  (autograd thread at 100% CPU, GPU idle, nothing logged). Cause unknown.

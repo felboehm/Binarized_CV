@@ -25,8 +25,13 @@ val_each_epoch: false
 # ultralytics): evaluation, epoch_N.pt, best.pt and the returned model use the
 # averaged weights, which are less noisy than the trained ones. The decay ramps
 # up as ema_decay * (1 - exp(-step / ema_tau)). null = off.
-ema_decay: 0.9999
-ema_tau: 2000
+# Its time constant (~1/(1 - decay) = 1000 steps, ~0.75 epoch) must stay well
+# below plateau_patience: with ultralytics' 0.9999 / 2000 it grew to ~7 epochs,
+# so val judged weights from before the last LR cut and the plateau rule
+# stopped after 20 epochs (docs/labnotes.md 2026-10-14). tau 500 reaches the
+# full window by ~epoch 3 instead of ~10.
+ema_decay: 0.999
+ema_tau: 500
 # Clip total grad norm (null = off). BNN training is unstable; the norm is
 # logged to TensorBoard either way.
 grad_clip: null

@@ -135,7 +135,7 @@ class ModelEMA:
     (`docs/labnotes.md` 2026-10-13). For binary layers it averages the
     latent real-valued weights; binarization still happens in its forward."""
 
-    def __init__(self, model: torch.nn.Module, decay: float = 0.9999, tau: float = 2000.0, updates: int = 0) -> None:
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999, tau: float = 500.0, updates: int = 0) -> None:
         self.module = copy.deepcopy(model).eval()
         for p in self.module.parameters():
             p.requires_grad_(False)
@@ -374,7 +374,7 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
     plateau_metric = cfg.train.get("plateau_metric", "ap50")
     grad_clip = cfg.train.get("grad_clip")
     ema_decay = cfg.train.get("ema_decay")
-    ema = ModelEMA(model, ema_decay, cfg.train.get("ema_tau", 2000)) if ema_decay else None
+    ema = ModelEMA(model, ema_decay, cfg.train.get("ema_tau", 500)) if ema_decay else None
     # What gets evaluated, saved as epoch_N.pt / best.pt and returned.
     eval_model = ema.module if ema is not None else model
 

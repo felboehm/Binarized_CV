@@ -42,6 +42,11 @@ cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
 BCV_DATA="${BCV_DATA:-/global/D1/homes/$USER/bcv-data/raw}"
 BCV_STAGE="${BCV_STAGE:-1}"
 export TQDM_MININTERVAL=60  # one progress line per minute in the log, not per batch
+# No pip installs from inside a job: when the staged images vanished
+# mid-run, ultralytics' PIL patch retried `pip install pi-heif` in every
+# DataLoader worker instead of failing on the missing file
+# (docs/labnotes.md 2026-10-14).
+export YOLO_AUTOINSTALL=false
 
 # One venv per architecture (setup_env.sh): .venv on x86_64, .venv-<arch>
 # otherwise (a40q = n009-n012 is aarch64). Fail before staging if it can't run.
