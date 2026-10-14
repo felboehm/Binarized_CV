@@ -96,12 +96,16 @@ def _attention_types() -> tuple[type[nn.Module], ...]:
 
 def assign_region(model: nn.Module, name: str, module_path: list[nn.Module]) -> str:
     """Region for the conv at dotted `name` (relative to `DetectionModel`),
-    given the chain of modules from the root down to it."""
+    given the chain of modules from the root down to it. `model` may also
+    hold only the first backbone layers (mid fusion's IR stream), without a
+    Detect head."""
+    from ultralytics.nn.modules.head import Detect
+
     parts = name.split(".")
     if parts[0] != "model" or len(parts) < 2 or not parts[1].isdigit():
         raise ValueError(f"Not a YOLO26 layer conv: {name!r}")
     index = int(parts[1])
-    detect_index = len(model.model) - 1
+    detect_index = len(model.model) - 1 if isinstance(model.model[-1], Detect) else None
 
     if index == detect_index:
         branch = parts[2]

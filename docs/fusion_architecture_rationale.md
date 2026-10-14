@@ -84,6 +84,20 @@ layer-by-layer execution loses this tracking.
 ready (IR models built, fusion modules ready). Recommendation: prioritize whichever option
 unblocks baseline training soonest, then iterate on fusion based on accuracy results.
 
+**Resolution (2026-10-14):** the constraint only applied to running the
+layers without ultralytics' bookkeeping. `yolo26_midfusion` now copies
+`DetectionModel._predict_once` (every saved output kept in a list `y`, the
+neck reading `y[4]`, `y[6]`, `y[10]`, ...) and replaces the output of each
+fusion layer with the fused features, so the neck's skip connections read
+fused features as well. `model.fusion_layers` picks the layers: `[6]` (P4,
+the choice above; the neck's P3 skip stays RGB-only and IR reaches the P3
+head only through the upsampled P4 path) or `[4, 6]` (adds P3).
+
+Since 2026-10-09 the dataset also warps IR onto the RGB grid
+(`data.ir_alignment=warp`), which weakens the "too fine-grained for
+non-aligned modalities" argument against P3 in the table above: P4 vs P3+P4
+is now an empirical question.
+
 ## Thesis Contribution
 
 This choice supports the binarization narrative:

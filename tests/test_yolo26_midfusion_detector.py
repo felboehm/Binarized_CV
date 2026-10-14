@@ -95,3 +95,44 @@ def test_different_batch_sizes(model):
             }
             detections = model(images)
             assert len(detections) == batch_size
+
+
+def _one2one_scores(model, rgb, ir):
+    preds = model._fused_forward(rgb, ir)
+    preds = preds[1] if isinstance(preds, tuple) else preds
+    return preds["one2one"]["scores"]
+
+
+@pytest.mark.parametrize("fusion_layers", [(6,), (4, 6)])
+def test_ir_input_changes_predictions(fusion_layers):
+    """IR actually reaches the head. In train mode: at init, eval-mode
+    BatchNorm (running stats 0/1) shrinks activations so far that neither
+    input changes the output."""
+    torch.manual_seed(0)
+    model = build_model("yolo26_midfusion", img_size=(128, 128), fusion_layers=fusion_layers).train()
+    rgb = torch.randn(2, 3, 128, 128)
+    with torch.no_grad():
+        a = _one2one_scores(model, rgb, torch.randn(2, 1, 128, 128))
+        b = _one2one_scores(model, rgb, torch.randn(2, 1, 128, 128))
+    assert not torch.allclose(a, b)
+
+
+def test_ir_stream_stops_at_last_fusion_layer():
+    model = build_model("yolo26_midfusion", fusion_layers=[4])
+    assert len(model.ir_stream.model) == 5
+    assert set(model.fusion) == {"4"}
+
+
+@pytest.mark.parametrize("fusion_layers", [[], [11], [-1]])
+def test_rejects_fusion_outside_backbone(fusion_layers):
+    with pytest.raises(ValueError, match="fusion_layers"):
+        build_model("yolo26_midfusion", fusion_layers=fusion_layers)
+
+
+def test_binarization_covers_ir_stream_but_not_fusion():
+    from binarized_cv.models.binarized import QuantConv2d
+
+    model = build_model("yolo26_midfusion", binarization={"preset": "ib_guided"})
+    # IR layer 6 is backbone_deep -> binary, like RGB layer 6.
+    assert any(isinstance(m, QuantConv2d) and m.w_bits == 1 for m in model.ir_stream.model[6].modules())
+    assert not any(isinstance(m, QuantConv2d) for m in model.fusion.modules())

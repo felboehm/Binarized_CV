@@ -80,7 +80,7 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       2026-10-03: `scripts/slurm/` + README §6. Jobs run on both partitions
       (`a100q` since 2026-10-05, `a40q` since 2026-10-09). Dataset
       lives on the shared BeeGFS, `/global/D1/homes/$USER/bcv-data/raw`, and
-      is staged to node-local `/tmp` per job; code, venv and `runs/` in `~`. Local
+      is read from there directly (staging to `/tmp` is optional since 2026-10-14); code, venv and `runs/` in `~`. Local
       RTX 2050 stays for development (~10–13.5 min/epoch)
 - [ ] Set up CI or at minimum a lint/test pre-commit hook
 
@@ -181,15 +181,14 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
         dropping misaligned train frames is worse (test 0.172, val 0.249).
         Default switched to warp only (`drop_misaligned_splits: []`).
   - [ ] **Mid fusion** (`yolo26_midfusion`): separate RGB and IR backbones,
-        merged at feature level via `ConcatFusion`, shared neck/head. RGB and
-        IR sub-models and the fusion module exist, but the forward pass is
-        still an **RGB-only placeholder**. Blocker: YOLO26's neck
-        concatenates earlier backbone outputs by layer index, so a single
-        P4/16 merge point doesn't work; needs either fusion at every scale the
-        neck reads (P3/P4/P5) or a custom forward that tracks all
-        intermediate outputs. Rationale for the P4 choice:
-        `docs/fusion_architecture_rationale.md`; constraint:
-        `docs/labnotes.md` 2026-09-19.
+        merged at feature level via `ConcatFusion`, shared neck/head.
+        **Forward pass wired** (2026-10-14): ultralytics' `_predict_once`
+        with the output of each `fusion_layers` layer replaced by the fused
+        features, so the neck's skip connections read them too (the
+        2026-09-19 blocker). Default P4 (`[6]`), `[4, 6]` also fuses P3.
+        Takes `binarization` (IR stream included) and `init_checkpoint`.
+        Not trained yet: fp32 baseline over seeds, then P4 vs P3+P4.
+        Rationale for the P4 choice: `docs/fusion_architecture_rationale.md`.
   - RGB-only `yolo26` serves as the no-fusion reference (does IR help at
     all on unregistered data?); late fusion stays an option for an ablation
     but is not planned (two full backbones work against the efficiency goal).
@@ -220,10 +219,7 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       model and a real production one. Details in `docs/labnotes.md`
       2026-09-07 (YOLO26 section).
 - [ ] Extend YOLO26 for multispectral input: done for early fusion
-      (`yolo26_early_fusion`); mid fusion still to wire (see the item above).
-      Once wired, `yolo26_midfusion` also needs the `binarization` /
-      `init_checkpoint` kwargs that `yolo26` and `yolo26_early_fusion`
-      already take
+      (`yolo26_early_fusion`) and mid fusion (`yolo26_midfusion`, untrained)
 - [ ] Reproduce or closely match published baseline metrics (from the TRGB
       or WiSARD papers, or a reimplemented VTSaR-style method) before
       touching binarization, so later deltas are trustworthy. First

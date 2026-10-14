@@ -1,6 +1,13 @@
+# YOLO26 mid fusion (RGB+IR): separate RGB and IR backbones up to the
+# deepest fusion layer, fused per layer by ConcatFusion, shared rest of the
+# backbone, neck and head (src/binarized_cv/models/detectors/yolo26_midfusion.py).
 name: yolo26_midfusion
 num_classes: 1
 img_size: [640, 640]
 scale: n
 pretrained: false
 conf_thresh: 0.25
+# YOLO26 backbone layers whose output is fused: 6 = P4/16 (the neck's P4
+# skip), 4 = P3/8 (the neck's P3 skip, small-object path). [6] leaves the
+# neck's P3 skip RGB-only (docs/fusion_architecture_rationale.md).
+fusion_layers: [6]

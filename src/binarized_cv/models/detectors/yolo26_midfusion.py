@@ -1,50 +1,68 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
+
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
+from torch import nn
 from ultralytics.cfg import get_cfg
 from ultralytics.nn.tasks import DetectionModel
 
 from binarized_cv.models.base import BaseDetector
+from binarized_cv.models.binarized import apply_binarization, format_region_stats
 from binarized_cv.models.detectors._ultralytics_common import (
     clamp_xyxy_to_image,
     targets_to_ultralytics_batch,
+    warm_start_and_binarize,
 )
 from binarized_cv.models.fusion import ConcatFusion
 from binarized_cv.models.registry import register_model
 
+log = logging.getLogger(__name__)
+
+
+class _IRStream(nn.Module):
+    """YOLO26 backbone layers 0..`last` for 1-channel IR input. The layers
+    live in `.model`, as in a `DetectionModel`, so `apply_binarization`
+    assigns them the same regions as the RGB backbone's layers."""
+
+    def __init__(self, scale: str, last: int) -> None:
+        super().__init__()
+        full = DetectionModel(cfg=f"yolo26{scale}.yaml", ch=1, nc=1, verbose=False)
+        self.model = full.model[: last + 1]
+
+    def forward(self, x: torch.Tensor, keep: frozenset[int]) -> dict[int, torch.Tensor]:
+        outputs = {}
+        for m in self.model:
+            x = m(x)
+            if m.i in keep:
+                outputs[m.i] = x
+        return outputs
+
 
 @register_model("yolo26_midfusion")
 class Yolo26MidFusionDetector(BaseDetector):
-    """YOLO26 multi-spectral detector: mid-fusion architecture decision pending.
+    """YOLO26 with mid fusion: separate RGB and IR backbones up to the
+    deepest fusion layer, merged per fusion layer by `ConcatFusion`; the
+    rest of the backbone, the neck and the head are shared.
 
-    **Design goal (from docs/fusion_architecture_rationale.md):**
-    Mid-fusion at P4/16 (layer 6, stride 16, 128 channels):
-    - RGB and IR backbones extract independently to P4/16
-    - Fuse via concatenation + learned projection
-    - Single shared neck/head processes fused features
-    - Rationale: respects non-registration (TRGB/WiSARD finding), binarization-friendly,
-      empirically motivated (standard FPN intermediate layer)
+    `self.model` is the RGB YOLO26 (backbone, neck, head) and `ir_stream`
+    a 1-channel copy of its backbone layers 0..max(`fusion_layers`). The
+    forward pass is ultralytics' `_predict_once` with the output of each
+    fusion layer replaced by the fused features, so everything downstream
+    reads them: the next layer and the neck's skip connections (layer 4 =
+    P3, layer 6 = P4 in `yolo26.yaml`). With the default `(6,)`, the neck's
+    P3 skip carries RGB-only features and IR reaches the P3 head only
+    through the upsampled P4 path; `(4, 6)` fuses at P3 as well
+    (`docs/fusion_architecture_rationale.md`).
 
-    **Implementation challenge identified (2026-09-19):**
-    YOLO26's architecture has tight coupling: Detect head requires multi-scale pyramid
-    (P3/P4/P5), and PAN neck has skip connections referencing specific layers by index.
-    Simple P4-only injection doesn't work; proper solution requires:
-    - Extracting full backbones to get all pyramid scales, or
-    - Fusing at multiple scales (P3, P4, P5), or
-    - Reimplementing forward pass to track layer dependencies
+    `binarization` applies the same region map to `self.model` and the IR
+    stream (an IR layer gets the region of the RGB layer with its index);
+    the fusion convs stay fp. `init_checkpoint` warm-starts from one of our
+    own fp32 checkpoints of this model before that swap.
 
-    **Options forward (see labnotes 2026-09-19 for full analysis):**
-    1. Early fusion (4-channel concat) - simplest, documented as weak baseline on misaligned data
-    2. Multi-scale mid-fusion (fuse P3/P4/P5) - complex, architecturally clean
-    3. Late fusion (P5/32) - avoids skip-connection complexity but efficiency penalty
-    4. RGB-only baseline - fastest path to training validation before fusion
-
-    Implementation approach TBD based on time/accuracy trade-offs. Both RGB and IR models
-    built and ready (3-ch and 1-ch variants). Fusion modules (ConcatFusion) ready.
-
-    See docs/fusion_architecture_rationale.md and docs/labnotes.md (2026-09-19) for
-    complete technical analysis and decision framework.
+    Depends on `ultralytics` (AGPL-3.0) — see `LICENSE`.
     """
 
     modalities = ("rgb", "ir")
@@ -56,102 +74,63 @@ class Yolo26MidFusionDetector(BaseDetector):
         scale: str = "n",
         pretrained: bool = False,
         conf_thresh: float = 0.25,
+        fusion_layers: Sequence[int] = (6,),
+        binarization: dict | None = None,
+        init_checkpoint: str | None = None,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.img_size = img_size
         self.conf_thresh = conf_thresh
+        self.fusion_layers = tuple(sorted(fusion_layers))
 
-        # RGB model: 3-channel (standard YOLO26)
-        self.rgb_model = DetectionModel(cfg=f"yolo26{scale}.yaml", ch=3, nc=num_classes, verbose=False)
-        self.rgb_model.args = get_cfg(overrides={})
+        self.model = DetectionModel(cfg=f"yolo26{scale}.yaml", ch=3, nc=num_classes, verbose=False)
+        self.model.args = get_cfg(overrides={})
+        # The backbone runs as a plain chain, so cutting the IR copy at a
+        # fusion layer loses nothing it needs.
+        backbone_len = len(self.model.yaml["backbone"])
+        if not self.fusion_layers or not all(0 <= i < backbone_len for i in self.fusion_layers):
+            raise ValueError(f"fusion_layers must be backbone layers 0..{backbone_len - 1}, got {fusion_layers}")
+        self.ir_stream = _IRStream(scale, self.fusion_layers[-1])
 
-        # IR model: 1-channel (thermal input)
-        self.ir_model = DetectionModel(cfg=f"yolo26{scale}.yaml", ch=1, nc=num_classes, verbose=False)
-        self.ir_model.args = get_cfg(overrides={})
-
-        # Fusion module at layer 6 (P4/16)
-        self.fusion = ConcatFusion(in_channels_per_modality=[128, 128], out_channels=128)
-
-        # Store layer lists for manual forward pass
-        self.model_layers = list(self.rgb_model.model)
-        self.ir_layers = list(self.ir_model.model)
-
-        # Use RGB model as primary reference
-        self.model = self.rgb_model
+        channels = self._layer_channels()
+        self.fusion = nn.ModuleDict(
+            {str(i): ConcatFusion([channels[i], channels[i]], channels[i]) for i in self.fusion_layers}
+        )
 
         if pretrained:
             checkpoint = torch.load(f"yolo26{scale}.pt", map_location="cpu", weights_only=False)
             try:
-                self.rgb_model.load(checkpoint)
-                self.ir_model.load(checkpoint)
+                self.model.load(checkpoint)
             except Exception as e:
                 print(f"Warning: Could not load pretrained weights: {e}")
 
-    def _fused_forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
-        """Forward pass with fused RGB+IR at P4/16, handling skip connections.
+        warm_start_and_binarize(self, None, init_checkpoint)
+        if binarization is not None:
+            for label, module in (("rgb + shared", self.model), ("ir stream", self.ir_stream)):
+                stats = apply_binarization(module, binarization)
+                log.info(
+                    "Binarization %s (preset=%s):\n%s", label, binarization.get("preset"), format_region_stats(stats)
+                )
 
-        Manually executes layers while tracking intermediate outputs for
-        skip connections (Concat layers that reference earlier layers).
-        """
-        # Track all intermediate outputs for skip connection references
-        layer_outputs = {}
+    @torch.no_grad()
+    def _layer_channels(self) -> dict[int, int]:
+        """Output channels of the fusion layers, from a small dummy pass."""
+        outputs = self.ir_stream(torch.zeros(1, 1, 64, 64), frozenset(self.fusion_layers))
+        return {i: t.shape[1] for i, t in outputs.items()}
 
-        # === Backbone: Layers 0-6 with fusion at layer 6 ===
-        # Extract backbone features independently
-        rgb_x = rgb
-        ir_x = ir
-        for i in range(7):
-            rgb_x = self.model_layers[i](rgb_x)
-            ir_x = self.ir_layers[i](ir_x)
-
-            if i < 6:
-                # Store pre-fusion intermediates from RGB (for now)
-                layer_outputs[i] = rgb_x
-
-        # Fuse at layer 6 (P4/16)
-        fused_x = self.fusion([rgb_x, ir_x])
-        layer_outputs[6] = fused_x
-
-        # === Neck/Head: Layers 7-23 with skip connections ===
-        # The neck has Concat layers that reference earlier layer outputs.
-        # We need to properly execute each layer and make referenced outputs available.
-        x = fused_x
-        for layer_idx in range(7, len(self.model_layers)):
-            layer = self.model_layers[layer_idx]
-
-            # Check if this is a Concat layer (has 'cat' in forward)
-            if hasattr(layer, 'cat') or 'Concat' in type(layer).__name__:
-                # Concat layer in ultralytics concatenates the previous layer output
-                # with outputs from referenced earlier layers.
-                # The layer.f list stores the indices of referenced layers.
-                if hasattr(layer, 'f'):
-                    # layer.f contains indices of layers to concatenate
-                    refs = layer.f
-                    if not isinstance(refs, (list, tuple)):
-                        refs = [refs]
-
-                    # Collect outputs to concatenate
-                    concat_inputs = [x]  # Previous layer output
-                    for ref_idx in refs:
-                        if isinstance(ref_idx, int) and ref_idx in layer_outputs:
-                            concat_inputs.append(layer_outputs[ref_idx])
-
-                    # Concatenate and pass through layer
-                    # (Layer's forward will handle the concat internally)
-                    try:
-                        x = layer(concat_inputs) if len(concat_inputs) > 1 else layer(x)
-                    except TypeError:
-                        # Fallback: just pass x if layer doesn't expect list
-                        x = layer(x)
-                else:
-                    x = layer(x)
-            else:
-                x = layer(x)
-
-            # Track this layer's output
-            layer_outputs[layer_idx] = x
-
+    def _fused_forward(self, rgb: torch.Tensor, ir: torch.Tensor):
+        """`DetectionModel._predict_once` on `rgb`, with each fusion layer's
+        output replaced by its fusion with the IR stream's output there."""
+        ir_features = self.ir_stream(ir, frozenset(self.fusion_layers))
+        y, x = [], rgb
+        for m in self.model.model:
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            x = m(x)
+            if m.i in ir_features:
+                x = self.fusion[str(m.i)]([x, ir_features[m.i]])
+            y.append(x if m.i in self.model.save else None)
         return x
 
     def forward(
@@ -159,21 +138,20 @@ class Yolo26MidFusionDetector(BaseDetector):
         images: dict[str, torch.Tensor],
         targets: list[dict[str, torch.Tensor]] | None = None,
     ) -> dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]:
-        rgb = images["rgb"]
-        ir = images["ir"]
+        rgb = images["rgb"]  # (B, 3, H, W)
+        ir = images["ir"]  # (B, 1, H_ir, W_ir)
+        # Same grid as RGB, so both streams' features match in size at the
+        # fusion layers (the dataset's warp/crop already puts IR on it).
+        if ir.shape[-2:] != rgb.shape[-2:]:
+            ir = F.interpolate(ir, size=rgb.shape[-2:], mode="bilinear", align_corners=False)
 
+        preds = self._fused_forward(rgb, ir)
         if targets is not None:
-            # Training mode: use RGB model's standard forward
-            # TODO: Implement fused loss computation
             batch = targets_to_ultralytics_batch(rgb, targets)
-            loss_sum, _loss_items = self.model(batch)
+            loss_sum, _loss_items = self.model.loss(batch, preds)
             return {"loss_box": loss_sum[0], "loss_cls": loss_sum[1], "loss_dfl": loss_sum[2]}
 
-        # Inference mode: use standard RGB model forward
-        # TODO: Proper fused inference with multi-scale fusion
-        raw, _preds = self.model(rgb)
-
-        # Decode detections
+        raw, _preds = preds
         results = []
         for row in raw:
             boxes, scores, labels = row[:, :4], row[:, 4], row[:, 5].long()

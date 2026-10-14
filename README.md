@@ -150,8 +150,8 @@ python -m binarized_cv.train.train \
 | `simple_fusion` | basic reference detector (toy CNN backbones + concat fusion), RGB+IR        |
 | `yolo26`        | real Ultralytics YOLO26 (`ultralytics.nn.tasks.DetectionModel`), RGB-only baseline |
 | `yolo26_early_fusion` | YOLO26 early fusion: resize IR to RGB size, concatenate as 4-channel input, single backbone. Simplest approach; known weak on misaligned data (TRGB/WiSARD) but documents that constraint (legitimate thesis result). |
-| `yolo26_midfusion` | YOLO26 mid fusion: separate RGB and IR backbones merged at feature level (`ConcatFusion`), shared neck/head. **Work in progress**: forward pass is still RGB-only, because YOLO26's neck reads earlier backbone layers by index (see `docs/fusion_architecture_rationale.md`). |
-| `yolo26_bnn` / `yolo26_early_fusion_bnn` | Binarized (mixed-precision) variants of `yolo26` / `yolo26_early_fusion`, see [Binarization](#5-binarization). |
+| `yolo26_midfusion` | YOLO26 mid fusion: separate RGB and IR backbones merged at feature level (`ConcatFusion`), shared neck/head. `model.fusion_layers` picks the fused backbone layers (default `[6]` = P4, `[4, 6]` adds P3). Not trained yet. |
+| `yolo26_bnn` / `yolo26_early_fusion_bnn` / `yolo26_midfusion_bnn` | Binarized (mixed-precision) variants of `yolo26` / `yolo26_early_fusion` / `yolo26_midfusion`, see [Binarization](#5-binarization). |
 | `ms_yolov8`     | RGB+thermal early-fusion YOLOv8, reimplementing Balla & Shrestha (EUSIPCO 2025) |
 
 Any field in `configs/{data,model,train,eval}/*.yaml` can be overridden on
@@ -286,12 +286,13 @@ squeue --me; tail -f runs/slurm/ib_guided_attn_<jobid>.out
 `job.sbatch` runs any entry point that takes Hydra overrides (`train_eval.py`,
 `binarization_sweep.py`, `estimate_layer_mi.py`):
 
-- **Data staging:** it checks that `$BCV_DATA` contains images (default
-  `/global/D1/homes/$USER/bcv-data/raw`), then copies it to `/tmp/$USER/bcv-data/raw`
-  on the node, because reading ~120k JPEGs from shared storage would starve
-  the GPU. The copy persists, so later jobs on the same node only run
-  rsync's check. `BCV_STAGE=0` reads `$BCV_DATA` directly. Remove the copy
-  when done (`srun -p a100q -w <node> --mem=0 rm -rf /tmp/$USER/bcv-data`).
+- **Data location:** it checks that `$BCV_DATA` contains images (default
+  `/global/D1/homes/$USER/bcv-data/raw`) and reads it there directly: the
+  train loader gets ~24 batches/s from BeeGFS (26 from node-local `/tmp`),
+  about 5× what training uses (`scripts/benchmark_loader.py`,
+  `docs/labnotes.md` 2026-10-14). `BCV_STAGE=1` copies it to
+  `/tmp/$USER/bcv-data/raw` on the node first; the copy persists, so later
+  jobs on the same node only run rsync's check. Remove the copy when done (`srun -p a100q -w <node> --mem=0 rm -rf /tmp/$USER/bcv-data`).
 - **Cluster defaults:** it sets `data.raw_root` and `data.num_workers`
   (`--cpus-per-task` − 2) through `$BCV_OVERRIDES`. `load_config` reads that
   variable *before* the command-line overrides, so anything passed explicitly
@@ -375,8 +376,8 @@ As of 2026-10-13. Details in `CHECKLIST.md` and `docs/labnotes.md`.
   fp32 and binarized form:
   - `yolo26_early_fusion` (4-channel input) — **trained**. This is the
     current baseline.
-  - `yolo26_midfusion` (feature-level fusion) — **in progress**, forward pass
-    still RGB-only.
+  - `yolo26_midfusion` (feature-level fusion) — **implemented, not trained
+    yet**.
   - `yolo26` (RGB only) is the no-fusion reference, `ms_yolov8` (Balla &
     Shrestha, EUSIPCO 2025) the first external comparison model.
 

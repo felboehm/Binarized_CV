@@ -16,7 +16,8 @@
 #
 # Environment (export before sbatch, or edit the defaults):
 #   BCV_DATA       shared copy of data/raw (default: /global/D1/homes/$USER/bcv-data/raw)
-#   BCV_STAGE      1 = copy BCV_DATA to node-local /tmp first (default 1)
+#   BCV_STAGE      1 = copy BCV_DATA to node-local /tmp first (default 0: read
+#                  BCV_DATA directly)
 #   BCV_OVERRIDES  extra default overrides, appended to the ones set here
 #
 # Partition: a100q (n013/n014, x86_64, 2x A100 each) by default. a40q
@@ -40,7 +41,7 @@ cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
 [ $# -ge 1 ] || { echo "usage: sbatch scripts/slurm/job.sbatch SCRIPT [ARGS...]" >&2; exit 2; }
 
 BCV_DATA="${BCV_DATA:-/global/D1/homes/$USER/bcv-data/raw}"
-BCV_STAGE="${BCV_STAGE:-1}"
+BCV_STAGE="${BCV_STAGE:-0}"
 export TQDM_MININTERVAL=60  # one progress line per minute in the log, not per batch
 # No pip installs from inside a job: when the staged images vanished
 # mid-run, ultralytics' PIL patch retried `pip install pi-heif` in every
@@ -66,8 +67,10 @@ if [ -z "$(find "$BCV_DATA/" -name '*.jp*g' -print -quit 2>/dev/null)" ]; then
     exit 1
 fi
 
-# Node-local copy of the dataset: reading ~120k JPEGs from shared storage
-# would starve the GPU. The copy persists in /tmp/$USER across jobs, so later
+# Optional node-local copy of the dataset (BCV_STAGE=1). Off by default:
+# the train loader reads 24 batches/s from BeeGFS vs 26 from /tmp, against
+# the ~4.8 training needs, and the /tmp copy was once deleted mid-run
+# (docs/labnotes.md 2026-10-14). The copy persists in /tmp/$USER across jobs, so later
 # jobs on the same node only pay rsync's file-list check. flock serialises
 # jobs that start on the same node at the same time. No --delete: other jobs
 # on the node may be reading the copy, and a stale extra file is harmless.

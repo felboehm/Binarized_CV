@@ -1243,3 +1243,38 @@ Findings:
   (boot-only); no other job was on the node. Cause unknown, ask the admins.
 - **Seed 1 hung on n010:** stuck in the first backward pass for 22 h
   (autograd thread at 100% CPU, GPU idle, nothing logged). Cause unknown.
+- **Mid fusion wired** (`yolo26_midfusion`): the forward pass was still the
+  2026-09-16 RGB-only placeholder. Now `self.model` is the RGB YOLO26
+  (backbone, neck, head), `ir_stream` a 1-channel copy of backbone layers
+  0..max(`fusion_layers`), and `_fused_forward` is ultralytics'
+  `_predict_once` with each fusion layer's output replaced by
+  `ConcatFusion([rgb, ir])` (1×1 conv back to the layer's width). The neck's
+  skip connections read the fused features, which resolves the 2026-09-19
+  constraint.
+  - `fusion_layers: [6]` (P4) by default, `[4, 6]` adds P3. YOLO26n: 2.85 M
+    params, of which the IR stream is 0.31 M (early fusion: one backbone).
+  - `binarization` applies the region map to both streams (IR layer *i* gets
+    the region of RGB layer *i*; `assign_region` now accepts a model without a
+    Detect head); the fusion convs stay fp. Config `yolo26_midfusion_bnn`.
+  - Pitfall when testing: at init in eval mode, BatchNorm's running stats
+    (0/1) shrink activations to ~1e-6 by layer 6, so *neither* input changes
+    the output. With warmed BN stats IR moves the logits about half as much
+    as RGB. The test checks IR influence in train mode.
+  - Untrained. Next: fp32 baseline (plateau, 3 seeds, same recipe as early
+    fusion), then P4 vs P3+P4.
+- **Data staging off by default** (`BCV_STAGE=0` in `job.sbatch`).
+  `scripts/benchmark_loader.py` (job 1431112, n010, 14 workers, batch 8,
+  300 timed batches on disjoint random train subsets per source):
+  BeeGFS `/global/D1` 23.8 batches/s first pass / 24.1 second, node-local
+  `/tmp` 26.3 / 26.1. Training uses ~4.8 batches/s on an A40, so BeeGFS has
+  ~5× headroom. First ≈ second pass for both: the loader is bound by
+  decoding, not reads. Caveat: n010 had rsynced the dataset from BeeGFS
+  ~10 min earlier, so its "cold" pass may be partly cached; concurrent jobs
+  were not measured. Staging also cost ~10 min on a fresh node and the
+  wiped `/tmp` copy killed seed 2 above. `BCV_STAGE=1` still stages.
+- **n010 hangs training jobs:** 3 of the last 3 there hung (ablation A
+  1429567 in epoch 1, EMA seed 1 1430479 and 1431104 at the first batch:
+  a CPU thread at 100%, GPU idle, nothing logged). n009/n011 have the same
+  driver (615.71.09), VBIOS and kernel and run fine; eval-only jobs on n010
+  finished. Seed 1 resubmitted as 1431126 with `--exclude=n010`. Report to
+  the admins.
