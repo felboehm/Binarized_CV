@@ -13,6 +13,7 @@ from binarized_cv.models.base import BaseDetector
 from binarized_cv.models.binarized import apply_binarization, format_region_stats
 from binarized_cv.models.detectors._ultralytics_common import (
     clamp_xyxy_to_image,
+    load_pretrained,
     targets_to_ultralytics_batch,
     warm_start_and_binarize,
 )
@@ -99,11 +100,8 @@ class Yolo26MidFusionDetector(BaseDetector):
         )
 
         if pretrained:
-            checkpoint = torch.load(f"yolo26{scale}.pt", map_location="cpu", weights_only=False)
-            try:
-                self.model.load(checkpoint)
-            except Exception as e:
-                print(f"Warning: Could not load pretrained weights: {e}")
+            load_pretrained(self.model, scale)
+            load_pretrained(self.ir_stream, scale)
 
         warm_start_and_binarize(self, None, init_checkpoint)
         if binarization is not None:

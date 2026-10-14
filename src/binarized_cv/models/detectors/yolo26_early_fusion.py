@@ -8,6 +8,7 @@ from ultralytics.nn.tasks import DetectionModel
 from binarized_cv.models.base import BaseDetector
 from binarized_cv.models.detectors._ultralytics_common import (
     clamp_xyxy_to_image,
+    load_pretrained,
     targets_to_ultralytics_batch,
     warm_start_and_binarize,
 )
@@ -80,11 +81,7 @@ class Yolo26EarlyFusionDetector(BaseDetector):
         self.model.args = get_cfg(overrides={})
 
         if pretrained:
-            checkpoint = torch.load(f"yolo26{scale}.pt", map_location="cpu", weights_only=False)
-            try:
-                self.model.load(checkpoint)
-            except Exception as e:
-                print(f"Warning: Could not load pretrained weights: {e}")
+            load_pretrained(self.model, scale)
 
         warm_start_and_binarize(self, binarization, init_checkpoint)
 

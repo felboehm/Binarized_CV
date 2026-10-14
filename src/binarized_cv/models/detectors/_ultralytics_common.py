@@ -45,6 +45,36 @@ def clamp_xyxy_to_image(boxes: torch.Tensor, img_size: tuple[int, int]) -> torch
     return torch.stack([x1, y1, x2, y2], dim=-1)
 
 
+def load_pretrained(model: nn.Module, scale: str) -> None:
+    """Load ultralytics' COCO-pretrained `yolo26{scale}.pt` into `model` (a
+    `DetectionModel`, or mid fusion's IR stream, whose layers are also in
+    `.model`). Downloads the file into the working directory if missing.
+
+    `BaseModel.load` semantics: every tensor with a matching name and shape
+    is copied, so the 80-class output convs stay at their init, and a first
+    conv with more input channels gets the RGB weights in its first three
+    (early fusion's IR channel stays random). A 1-channel first conv (IR)
+    gets the sum over the RGB channels instead of ultralytics' red channel
+    only: the response to a gray image, which IR is closest to. Raises if
+    (almost) nothing matches, rather than training from scratch unnoticed."""
+    from ultralytics.nn.tasks import BaseModel
+    from ultralytics.utils.downloads import attempt_download_asset
+
+    path = attempt_download_asset(f"yolo26{scale}.pt")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)  # ultralytics' own pickled model
+    source = checkpoint["model"].float().state_dict()
+    target = model.state_dict()
+    matched = [k for k, v in source.items() if k in target and v.shape == target[k].shape]
+    if len(matched) < len(target) // 2:
+        raise RuntimeError(f"{path}: only {len(matched)}/{len(target)} tensors match the model")
+    BaseModel.load(model, checkpoint, verbose=False)
+    first = "model.0.conv.weight"
+    if first in target and target[first].shape[1] == 1:
+        with torch.no_grad():
+            model.state_dict()[first].copy_(source[first].sum(dim=1, keepdim=True))
+    log.info("Loaded %d/%d tensors from %s", len(matched), len(target), path)
+
+
 def warm_start_and_binarize(
     detector: nn.Module, binarization: dict | None, init_checkpoint: str | None
 ) -> None:
