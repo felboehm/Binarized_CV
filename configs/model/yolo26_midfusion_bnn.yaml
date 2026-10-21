@@ -11,6 +11,8 @@ fusion_layers: [6]
 # fp32 checkpoint of this same model (e.g. runs/checkpoints/yolo26_midfusion/<ts>/epoch_N.pt)
 # to warm-start from — strongly recommended for BNN training.
 init_checkpoint: null
+# false = the IR stream stays fp (only RGB + shared layers are binarized).
+binarize_ir_stream: true
 binarization:
   preset: ib_guided  # fp32 | ib_guided | full
   # Per-region override of the preset: fp | binary | <bits>. null = preset value.

@@ -136,3 +136,11 @@ def test_binarization_covers_ir_stream_but_not_fusion():
     # IR layer 6 is backbone_deep -> binary, like RGB layer 6.
     assert any(isinstance(m, QuantConv2d) and m.w_bits == 1 for m in model.ir_stream.model[6].modules())
     assert not any(isinstance(m, QuantConv2d) for m in model.fusion.modules())
+
+
+def test_binarize_ir_stream_false_keeps_ir_fp():
+    from binarized_cv.models.binarized import QuantConv2d
+
+    model = build_model("yolo26_midfusion", binarization={"preset": "ib_guided"}, binarize_ir_stream=False)
+    assert not any(isinstance(m, QuantConv2d) for m in model.ir_stream.modules())
+    assert any(isinstance(m, QuantConv2d) and m.w_bits == 1 for m in model.model.model[6].modules())

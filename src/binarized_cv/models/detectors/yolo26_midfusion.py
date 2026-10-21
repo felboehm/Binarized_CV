@@ -60,7 +60,8 @@ class Yolo26MidFusionDetector(BaseDetector):
 
     `binarization` applies the same region map to `self.model` and the IR
     stream (an IR layer gets the region of the RGB layer with its index);
-    the fusion convs stay fp. `init_checkpoint` warm-starts from one of our
+    the fusion convs stay fp. `binarize_ir_stream=False` keeps the IR stream
+    fp as well. `init_checkpoint` warm-starts from one of our
     own fp32 checkpoints of this model before that swap.
 
     Depends on `ultralytics` (AGPL-3.0) — see `LICENSE`.
@@ -78,6 +79,7 @@ class Yolo26MidFusionDetector(BaseDetector):
         fusion_layers: Sequence[int] = (6,),
         binarization: dict | None = None,
         init_checkpoint: str | None = None,
+        binarize_ir_stream: bool = True,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -105,7 +107,8 @@ class Yolo26MidFusionDetector(BaseDetector):
 
         warm_start_and_binarize(self, None, init_checkpoint)
         if binarization is not None:
-            for label, module in (("rgb + shared", self.model), ("ir stream", self.ir_stream)):
+            streams = [("rgb + shared", self.model)] + [("ir stream", self.ir_stream)] * binarize_ir_stream
+            for label, module in streams:
                 stats = apply_binarization(module, binarization)
                 log.info(
                     "Binarization %s (preset=%s):\n%s", label, binarization.get("preset"), format_region_stats(stats)

@@ -1278,3 +1278,94 @@ Findings:
   driver (615.71.09), VBIOS and kernel and run fine; eval-only jobs on n010
   finished. Seed 1 resubmitted as 1431126 with `--exclude=n010`. Report to
   the admins.
+
+## 2026-10-21 (mid fusion BNN comparison, mid fusion alignment ablation)
+
+- **Runs:** mid fusion (`fusion_layers: [6]`), plateau schedule, EMA 0.999 /
+  tau 500, eval at score threshold 0.001; all `runs/` JSONs synced locally.
+  - **BNN comparison:** jobs 1437626 (fp32 control), 1437627 (`ib_guided`)
+    and 1437628 (`ib_guided` + binary attention), seeds 0–2, a100q. All
+    three warm-start from the **same** parent,
+    `yolo26_midfusion_coco_seed0/2026-10-14_22-01-29/best.pt`, so their
+    ± covers only the fine-tune seed. Recipe: Adam, lr 1e-3, 1 warmup
+    epoch, EDE anneal over 10 epochs, 60-epoch cap.
+  - **Alignment ablation A:** job 1437623 (`data.ir_alignment=none`,
+    unaligned manifest), 100-epoch cap, a40q.
+  - All 12 tasks exited 0. The `slurmstepd: error: _cgroup_procs_check`
+    lines in `mf_ablA_noalign_1437625.out` are harmless cleanup noise.
+- **Results:** test AP50, mean ± std over 3 seeds.
+
+  | run | val AP50 | test AP50 | test TRGB | test WiSARD | test APS50 |
+  |---|---|---|---|---|---|
+  | parent (`midfusion_coco` seed 0) | 0.466 | 0.612 | 0.893 | 0.571 | 0.548 |
+  | `midfusion_coco` (3 seeds) | 0.474 | 0.586 ± .026 | 0.920 | 0.535 | 0.455 |
+  | fp32 control | 0.467 | 0.598 ± .016 | 0.902 | 0.555 | 0.494 |
+  | `ib_guided` | 0.444 | 0.433 ± .025 | 0.884 | 0.357 | 0.343 |
+  | `ib_guided` + binary attention | 0.439 | 0.386 ± .042 | 0.881 | 0.301 | 0.312 |
+  | mid fusion, no alignment | 0.391 | 0.517 ± .039 | 0.865 | 0.465 | 0.278 |
+
+- **The fp32 control isolates binarization.** Continuing at fp32 matches the
+  parent (val 0.467 vs 0.466, test 0.598 vs 0.612), so the recipe neither
+  helps nor hurts.
+- **The `ib_guided` loss sits on the unseen WiSARD test flight (Baker).**
+  - **Val:** −0.023, and val WiSARD is unchanged (0.255 vs 0.258).
+  - **Test TRGB:** −0.018.
+  - **Test WiSARD:** −0.20 (0.555 → 0.357). Test APS50 drops by 0.15.
+  - The binary net fits the training flights almost as well but transfers
+    worse to a new flight. Val can't see this, so `best.pt` selection and
+    the val-scored region sweep (`docs/binarization_findings.md`) likely
+    understate the cost of binarization.
+- **Binary attention:** val −0.005, test −0.047, again WiSARD only.
+  Not significant (n=3, ± .025 / .042, t ≈ 1.7; seed 0 at 0.327 pulls the
+  mean down). Consistent with attention being cheap to binarize.
+- **No run improved after the first LR cut.**
+  - Per-epoch val (plateau log lines) has its best epoch at full LR in all
+    9 runs: epochs 2–4 for fp32 control, 2–5 for `ib_guided`, 4–6 for
+    binary attention. Each run stopped after 12–16 epochs.
+  - So every BNN `best.pt` comes from **inside the 10-epoch EDE anneal**
+    (surrogate sharpness still well below `ede_t_max`). The forward pass is
+    exact sign throughout, so the net is truly binary, but it never trained
+    with sharp gradients.
+  - Patience 3 against a val that peaks early stops the run before the
+    anneal ends. Worth trying anneal ≤ the epoch of the first cut, or
+    holding the LR until the anneal finishes.
+- **Mid fusion needs IR alignment too.** No alignment vs warp: val −0.083
+  (WiSARD val 0.144 vs 0.247), test −0.069 (TRGB −0.055, WiSARD −0.070).
+  - Fusing at P4 (stride 16) does not absorb the offset.
+  - Early fusion lost ~0.04 test AP50 (A vs B @0.001, 2026-10-13), but that
+    comparison had no COCO init and no EMA. Keep warp as the default for
+    every fusion type.
+- **Mid vs early fusion (both COCO init, 3 seeds):** val 0.474 vs 0.415,
+  test 0.586 vs 0.438. Most of the gain is on WiSARD (0.535 vs 0.369) and
+  small objects (0.455 vs 0.124).
+- **Caveats.**
+  - Test > val for the fp32 runs because the test set is easier (TRGB test
+    ~0.9). Compare within one split only.
+  - The WiSARD test is one flight, so the transfer gap is one domain shift:
+    significant across seeds, but thin as general evidence.
+  - `runs/bnn/*_20ep` and `smoke_test` (val ~0.7) predate the flight-wise
+    split. Don't table them with these runs.
+- **Queued diagnostics (2026-10-21):**
+  - **BN re-estimation (AdaBN), jobs 1440282 / 1440270 / 1440272** (fp32
+    control, `ib_guided`, + binary attention; seeds 0–2; a40q, excl. n010).
+    `scripts/eval_checkpoints.py` re-estimates every BatchNorm's running
+    stats on 2000 images from each source, with k-bit activation ranges
+    frozen, then evaluates `best.pt` on test and val:
+    - `train` (same domain): tests whether EMA-averaged binary latent
+      weights and EMA-averaged BN stats disagree.
+    - `test` (transductive).
+    - `test_wisard` (Baker only; read only its `*_wisard` metrics).
+    - Output: `runs/diag/mf_<config>_plateau_seed<N>_bn.json`.
+    - If `test_wisard` recovers most of the WiSARD drop, the gap is stale
+      activation statistics, not lost features.
+  - **Test AP of every epoch, jobs 1440283 / 1440271 / 1440273:**
+    `epoch_*.pt` of the same 9 runs, into `..._epochs.json`. Shows whether
+    WiSARD test keeps improving after the val-best epoch, i.e. whether val
+    selection hurts.
+  - **IR stream fp, job 1440274:** `ib_guided` with the new
+    `model.binarize_ir_stream=false` (RGB + shared layers binarized, the
+    0.31 M-param IR stream fp), same parent and recipe, seeds 0–2, a100q.
+    Output: `runs/bnn/mf_ib_guided_irfp_plateau_seed<N>.json`. If WiSARD
+    test recovers, the binarized IR features are what fail to transfer.
+- **Next:** fine-tune from all three parent seeds, not just seed 0, and
+  validate on a held-out flight so model selection can see the transfer gap.
