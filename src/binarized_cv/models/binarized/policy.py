@@ -147,6 +147,12 @@ class BinarizationConfig:
     # they are cheap anyway. Keep them at the region's k-bit fallback.
     skip_depthwise: bool = True
     depthwise_fallback_bits: int | None = 8
+    # Deployment-faithful quantization (see `QuantConv2d`): opt-in so that
+    # existing checkpoints evaluate as trained; to become the default once
+    # retrained models replace them (CHECKLIST.md section 10).
+    binary_padding: str = "symmetric"  # symmetric | same (TF/LCE)
+    integer_zero_point: bool = False
+    quantize_output: bool = False
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> BinarizationConfig:
@@ -215,7 +221,15 @@ def apply_binarization(model: nn.Module, cfg: BinarizationConfig | dict | None) 
         setattr(
             parent,
             child_name,
-            QuantConv2d.from_conv(conv, w_bits=bits, a_bits=bits, stochastic=cfg.stochastic and bits == 1),
+            QuantConv2d.from_conv(
+                conv,
+                w_bits=bits,
+                a_bits=bits,
+                stochastic=cfg.stochastic and bits == 1,
+                binary_padding=cfg.binary_padding,
+                integer_zero_point=cfg.integer_zero_point,
+                quantize_output=cfg.quantize_output,
+            ),
         )
     return stats
 

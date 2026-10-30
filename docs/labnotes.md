@@ -1369,3 +1369,190 @@ Findings:
     test recovers, the binarized IR features are what fail to transfer.
 - **Next:** fine-tune from all three parent seeds, not just seed 0, and
   validate on a held-out flight so model selection can see the transfer gap.
+
+## 2026-10-24 (efficiency harness, first latency/energy numbers)
+
+- **Added** `src/binarized_cv/eval/efficiency.py`,
+  `scripts/benchmark_efficiency.py`, `run_efficiency.sh`,
+  `collect_efficiency.py` (replaces the planned `benchmark_latency.py` /
+  `measure_power.py`). Per config: MACs per precision, OPs = fp MACs +
+  BOPs/64 (k-bit MAC = k_w·k_a BOPs, so 8-bit costs as much as fp), packed
+  size, latency/FPS (3 rounds × ≥10 s, mean ± std over rounds) and energy
+  per image from RAPL package (CPU) and NVML (GPU). Batch 1, 640×640,
+  random weights (latency doesn't depend on them).
+- **Inference prep:** eval mode still runs YOLO26's train-only one2many head
+  unless `Detect.fuse()` drops it; `DetectionModel.fuse()` can't be used on a
+  BNN, since it replaces each `QuantConv2d` with a plain fused conv.
+  `prepare_for_inference` drops one2many and folds BN into fp convs only.
+- **CPU pinning matters on the Core Ultra 5 135H** (4 P + 8 E + 2 LP-E): torch's
+  default 14 threads give 84 ms for early fusion fp32, 4 threads pinned to
+  the P-cores (`--cpus 0,2,4,6`) 38 ms; 8 P+HT 46 ms, 12 P+E 44 ms. The
+  slowest core gates every parallel op. All CPU numbers below use 0,2,4,6.
+- **Results** (`runs/efficiency/Deckard/`, energy = RAPL package on CPU,
+  NVML board on GPU, total incl. idle):
+
+| run | MACs fp / 8b / 1b (G) | OPs (G) | packed (KiB) | CPU ms | CPU mJ | GPU ms | GPU mJ |
+|---|---|---|---|---|---|---|---|
+| yolo26 RGB fp32 | 2.65 / 0 / 0 | 2.65 | 9,285 | 35.4 | 1,425 | 8.5 | 250 |
+| ms_yolov8 fp32 | 4.06 / 0 / 0 | 4.06 | 11,742 | 35.8 | 1,527 | 8.7 | 259 |
+| early fusion fp32 | 2.67 / 0 / 0 | 2.67 | 9,286 | 38.4 | 1,671 | 7.5 | 223 |
+| early fusion `ib_guided` | 0.55 / 0.89 / 1.23 | 1.46 | 2,068 | 73.8 sim | 3,145 sim | 27.8 sim | 709 sim |
+| + binary attention | 0.40 / 0.89 / 1.38 | 1.31 | 741 | 76.9 sim | 3,157 sim | 30.5 sim | 755 sim |
+| mid fusion fp32 | 3.78 / 0 / 0 | 3.78 | 10,617 | 46.2 | 1,943 | 11.8 | 351 |
+| mid fusion `ib_guided` | 0.88 / 1.29 / 1.61 | 2.20 | 2,351 | 95.9 sim | 4,028 sim | 45.7 sim | 1,136 sim |
+| + binary attention | 0.74 / 1.29 / 1.75 | 2.05 | 1,024 | 101.1 sim | 4,234 sim | 49.1 sim | 1,192 sim |
+
+- **Reading:**
+  - `sim` rows time the PyTorch simulation (fp32 conv on rounded weights
+    plus the quantizer ops), ~2× slower than fp32 on CPU, ~4× on GPU. They
+    say nothing about a deployed BNN; only OPs and packed size do.
+  - `ib_guided` cuts OPs only 1.8× (2.67 → 1.46 G): the 8-bit P3 path and
+    one2one head (0.89 G MACs) count at full cost and are 61 % of the
+    remaining OPs. The 8-bit layers, not the binary ones, are now the
+    compute lever; P3 at 4-bit would count 1/4.
+  - MACs don't predict latency: ms_yolov8 has 1.5× the MACs of yolo26 and
+    the same CPU latency (YOLO26's attention and many small layers are
+    memory-bound).
+  - Mid fusion costs +42 % MACs and +20 % CPU latency over early fusion
+    (the IR stream).
+  - CPU energy is ~40 mJ/ms of latency at ~40 W package power; the GPU
+    runs of the fp32 models also use ~140–270 mJ of CPU package energy per
+    image on top of the GPU's.
+- **Caveats:** idle power between runs varied 3.8–12 W (CPU package), so the
+  `above_idle` figures in the JSONs are noisier than the totals. One
+  machine, laptop on AC, `powersave` governor / `balance_performance` EPP.
+- **Next:** a real binary kernel (bit-packed XNOR + popcount conv) to turn
+  the `sim` rows into measured ones; until then, OPs and packed size are
+  the BNN efficiency claims.
+
+## 2026-10-24 (Larq Compute Engine feasibility test; deployment-faithful quantization options)
+
+- **Question:** can our PyTorch BNNs run on LCE's real binary kernels via
+  an export, or does the model need rebuilding in Keras/Larq? Tested on toy
+  models (fp conv, binary 3×3 s1 / 3×3 s2 / 1×1 with learned threshold and
+  α, BN, 8-bit conv) in a separate env: Python 3.12, TF 2.16.1, `tf_keras`
+  2.16, LCE 0.16.0 (last release, 2024-06), onnx2tf 1.22.5. LCE's optimised
+  kernels and `lce_benchmark_model` are ARM-only; on x86 the LCE interpreter
+  only checks correctness.
+- **Route 1, Larq-built Keras → LCE:** binary 3×3 s1 and s2 become
+  `LceQuantize` + `LceBconv2d` (bit-packed int32 weights, α and BN folded
+  into the output transform), fake-quant 8-bit becomes a real int8
+  `CONV_2D`. Output within one int8 output step (16/255) of Keras.
+- **Route 2, PyTorch → baked → ONNX → onnx2tf → LCE:** binary convs are
+  baked to sign(W) constants + α, the input sign written as
+  `sign(sign(x − τ) + 0.1)` (Larq's ste_sign; 0 → +1 like our `binarize`).
+  - 3×3 s1 and 1×1 become `LceBconv2d` and match exactly, after rewriting
+    the bconv's per-channel multiplier/bias from onnx2tf's 4-D `[1,1,1,C]`
+    to 1-D in the flatbuffer (else `NumDimensions(post_activation_multiplier)
+    != 1` at allocation).
+  - 3×3 s2: onnx2tf emits an explicit pad; LCE then runs the conv in fp
+    (`LceQuantize` → `LceDequantize` → `CONV_2D`). With PyTorch's
+    symmetric padding the LCE converter **silently miscompiles** it (drops
+    the pad, max error 0.40 on a 0.56 output range) although onnx2tf's own
+    Keras model is exact. Always check exports numerically.
+  - 8-bit: ONNX QuantizeLinear/DequantizeLinear become fp arithmetic, no
+    int8 conv.
+- **Simulation vs deployment mismatches found**, now fixed behind opt-in
+  options (`model.binarization.*`, default off so existing checkpoints
+  evaluate as trained; phase-out tracked in CHECKLIST §10):
+  - `binary_padding: same` — stride-2 binary convs pad like TF/LCE `SAME`
+    (0 top/left, 1 bottom/right) instead of symmetrically. Affects layers
+    5, 7, 19 in `ib_guided` (and layer 5 of mid fusion's IR stream); the
+    sampling grid shifts by one input pixel, so needs a fine-tune.
+  - `integer_zero_point: true` — k-bit activations as `scale·(q − z)` with
+    integer z and a range including 0 (= `torch.fake_quantize_per_tensor_affine`).
+    The old grid starts at the observed minimum: 0.015 error on a 1.1 range
+    in the toy.
+  - `quantize_output: true` — k-bit conv outputs fake-quantized with their
+    own EMA range, as an int8 kernel writes int8. Old checkpoints load
+    (missing output range starts uninitialised).
+  - With `binary_padding=same` + `integer_zero_point`, route 2's LCE output
+    equals the `QuantConv2d` simulation exactly (was 0.40 off).
+- **Caveat:** warm-starting a fine-tune from a BNN checkpoint via
+  `model.init_checkpoint` loads into the fp model before binarization, so
+  learned thresholds τ and k-bit ranges are dropped and re-initialised from
+  data (pre-existing behaviour).
+- **Next:** measure what the options cost on existing checkpoints without
+  fine-tuning, then fine-tune with them on; choose between the Keras/Larq
+  rebuild (route 1, int8 works) and fixing the ONNX path (stride-2, int8).
+
+## 2026-10-24 (results of the 2026-10-21 mid fusion diagnostics)
+
+Mid fusion BNNs, plateau schedule, seeds 0–2, `best.pt` (val-selected);
+test AP50 mean ± std. Files: `runs/diag/mf_*_bn.json`, `*_epochs.json`,
+`runs/bnn/mf_ib_guided_irfp_plateau_seed*.json`.
+
+- **BN re-estimation (AdaBN) does not close the WiSARD gap.** Re-estimating
+  on train changes nothing (EMA weights and EMA BN stats agree). On the
+  WiSARD test flight it makes WiSARD AP *worse* for every config:
+
+| config | WiSARD AP50, as trained | after BN on `test_wisard` |
+|---|---|---|
+| fp32 control | 0.555 ± .027 | 0.467 ± .045 |
+| `ib_guided` | 0.358 ± .041 | 0.333 ± .010 |
+| + binary attention | 0.302 ± .061 | 0.371 ± .048 |
+
+  Only binary attention gains, within its large seed spread. The gap is not
+  stale activation statistics.
+- **Val selection hurts transfer.** Test WiSARD AP peaks at epoch 0–3 and
+  declines afterwards; val (MtErie) picks epoch 2–6. Examples: `ib_guided`
+  seed 1 has WiSARD 0.563 at epoch 0 (fp32 level) but 0.391 at `best.pt`
+  (epoch 5); seed 2 0.474 → 0.370. fp32 declines too (seed 0: 0.578 at
+  epoch 1, 0.529 at `best.pt`, 0.481 at the last epoch), less steeply. The
+  models drift towards the training flights as training continues, faster
+  when binarized, and val doesn't see it.
+- **The binarized IR stream causes most of the transfer loss.** Keeping the
+  0.31 M-param IR stream fp (`model.binarize_ir_stream=false`):
+
+| config | test AP50 | TRGB | WiSARD | APS50 |
+|---|---|---|---|---|
+| fp32 control | 0.598 ± .020 | 0.902 | 0.555 | 0.494 |
+| `ib_guided` | 0.433 ± .031 | 0.884 | 0.357 | 0.343 |
+| `ib_guided`, IR stream fp | **0.544 ± .026** | 0.886 | **0.497** | **0.501** |
+| + binary attention | 0.386 ± .052 | 0.881 | 0.301 | 0.312 |
+
+  TRGB is unchanged across all BNNs; the whole difference is WiSARD. With an
+  fp IR stream small-object AP matches fp32. Cost (`count_ops`): 2.20 →
+  2.56 G OPs (fp32 3.78), packed 2,351 → 3,400 KiB.
+- **Reading:** binarizing the IR features is what fails to transfer to the
+  unseen flight, and val selection compounds it. Candidate next steps: make
+  `binarize_ir_stream=false` the mid fusion BNN default; try an 8-bit IR
+  stream (between the two in cost); select on a held-out flight or stop
+  earlier.
+
+## 2026-10-24 (cost of the deployment-faithful quantization options, no fine-tune)
+
+- **Setup:** the 9 mid fusion BNN `best.pt` (plateau, seeds 0–2) evaluated
+  on test with each option alone and all three together, without
+  fine-tuning (`runs/diag/deploy_opts/mf_<config>_<option>.json`; local RTX
+  2050, the default reproduces the cluster's numbers to ±0.001).
+  `quantize_output` ranges were estimated by the new
+  `scripts/eval_checkpoints.py --calib-output-range 100` (EMA over 100
+  train batches, BN and input ranges frozen), since these checkpoints were
+  trained without them.
+- **Test AP50** (mean over seeds; Δ = paired per-seed difference ± std):
+
+| option | `ib_guided` | IR stream fp | + binary attention |
+|---|---|---|---|
+| default | 0.434 | 0.546 | 0.388 |
+| `binary_padding=same` | −0.074 ± .014 | −0.001 ± .016 | −0.077 ± .009 |
+| `integer_zero_point` | +0.001 ± .005 | −0.002 ± .001 | −0.000 ± .006 |
+| `quantize_output` | −0.005 ± .014 | −0.018 ± .002 | −0.009 ± .013 |
+| all three | −0.072 ± .010 | +0.001 ± .020 | −0.080 ± .016 |
+
+- **Reading:**
+  - Integer zero point: free.
+  - Output quantization: small, mostly TRGB (IR fp: 0.887 → 0.848), WiSARD
+    nearly unchanged. Ranges fitted post hoc; a fine-tune should recover it.
+  - `SAME` padding costs ~0.075 only when the IR stream is binarized, all of
+    it on WiSARD (`ib_guided` 0.359 → 0.267) and small objects (−0.09);
+    TRGB rises slightly. On the RGB/shared stride-2 convs (layers 5, 7, 19,
+    IR fp config) it costs nothing, so the sensitive conv is the IR stream's
+    binary downsample (layer 5). Untested hypothesis: the black border of
+    the warped WiSARD IR makes edge features of the binary IR stream
+    fragile.
+  - The IR-stream-fp checkpoints export without fine-tuning: all three
+    options together leave test AP50 at 0.546.
+- **Next:** make the IR stream fp the mid fusion BNN default (also the best
+  config by accuracy, 2026-10-24 diagnostics entry), train new runs with the
+  three options on, and use an IR-fp checkpoint for the first LCE export.

@@ -25,6 +25,12 @@ null (the checkpoint replaces it anyway).
 Only the BatchNorm layers switch to train mode during recalibration, so the
 k-bit layers' activation ranges stay as trained.
 
+`--calib-output-range N`: for models built with
+`model.binarization.quantize_output=true` from checkpoints trained without
+it, estimate the k-bit output ranges (EMA over N training batches, as
+training would) before evaluating, instead of from the first eval batch.
+BN statistics and input ranges stay as trained.
+
 Output: {checkpoint: {"none": {...}, "bn_<source>": {...}}}, metrics as in
 train_eval.py (test ones prefixed `test_`).
 """
@@ -45,6 +51,7 @@ from binarized_cv.data.collate import detection_collate
 from binarized_cv.data.dataset import MultispectralPersonDataset
 from binarized_cv.data.manifest import load_manifest
 from binarized_cv.eval.evaluate import evaluate_model
+from binarized_cv.models.binarized import QuantConv2d
 from binarized_cv.models.registry import build_model_from_config
 from binarized_cv.train import train
 
@@ -96,6 +103,29 @@ def recalibrate_bn(model: nn.Module, loader: DataLoader) -> None:
     log.info("re-estimated %d BatchNorm layers over %d images", len(bns), len(loader.dataset))
 
 
+@torch.no_grad()
+def calibrate_output_ranges(model: nn.Module, loader: DataLoader, batches: int) -> None:
+    """EMA of every `quantize_output` layer's output min/max over `batches`
+    training batches, the rest of the model in eval mode. Those layers'
+    input ranges would update too in train mode, so they are restored."""
+    layers = [m for m in model.modules() if isinstance(m, QuantConv2d) and m.out_bits]
+    if not layers:
+        return
+    device = next(model.parameters()).device
+    input_ranges = [m.act_range.clone() for m in layers]
+    model.eval()
+    for m in layers:
+        m.train()
+    for i, batch in enumerate(loader):
+        if i == batches:
+            break
+        model({k: t.to(device) for k, t in batch["images"].items()})
+    for m, saved in zip(layers, input_ranges):
+        m.eval()
+        m.act_range.copy_(saved)
+    log.info("calibrated %d output ranges over %d batches", len(layers), min(batches, len(loader)))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("out", type=Path, help="where to write the metrics (JSON)")
@@ -103,6 +133,7 @@ def main() -> None:
     parser.add_argument("--bn-recalib", nargs="*", default=[], choices=sorted(RECALIB_SOURCES))
     parser.add_argument("--splits", nargs="+", default=["test"], choices=["test", "val"])
     parser.add_argument("--max-recalib-images", type=int, default=2000)
+    parser.add_argument("--calib-output-range", type=int, default=0, metavar="BATCHES")
     argv = sys.argv[1:]
     split_at = argv.index("--") if "--" in argv else len(argv)
     args = parser.parse_args(argv[:split_at])
@@ -117,6 +148,8 @@ def main() -> None:
 
     base = build_model_from_config(cfg.model).to(device)
     loaders = {s: recalib_loader(cfg, s, args.max_recalib_images) for s in args.bn_recalib}
+    if args.calib_output_range:
+        calib = recalib_loader(cfg, "train", args.calib_output_range * cfg.data.batch_size)
     results = {}
     for path in paths:
         state = torch.load(path, map_location=device, weights_only=True)
@@ -124,6 +157,8 @@ def main() -> None:
         for variant in ["none", *args.bn_recalib]:
             model = copy.deepcopy(base)
             model.load_state_dict(state)
+            if args.calib_output_range:
+                calibrate_output_ranges(model, calib, args.calib_output_range)
             if variant != "none":
                 recalibrate_bn(model, loaders[variant])
             metrics = {}

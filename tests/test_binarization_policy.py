@@ -139,3 +139,22 @@ def test_warm_start_from_fp32_checkpoint_then_round_trip(tmp_path, batch):
     reloaded = build_model("yolo26", img_size=(128, 128), binarization={"preset": "ib_guided"})
     reloaded.load_state_dict(torch.load(bnn_path))
     assert reloaded.model.model[6].cv1.conv.initialized
+
+
+def test_deployment_options_reach_quantized_convs(fresh_yolo26):
+    model = fresh_yolo26()
+    apply_binarization(
+        model, {"preset": "ib_guided", "binary_padding": "same", "integer_zero_point": True, "quantize_output": True}
+    )
+    downsample = model.get_submodule("model.5.conv")  # backbone_deep, binary, stride 2
+    p3 = model.get_submodule("model.3.conv")  # 8-bit
+    assert downsample.binary_padding == "same" and downsample._uses_same_padding()
+    assert p3.integer_zero_point and p3.out_bits == 8
+
+
+def test_deployment_options_default_off(fresh_yolo26):
+    model = fresh_yolo26()
+    apply_binarization(model, {"preset": "ib_guided"})
+    downsample = model.get_submodule("model.5.conv")
+    assert not downsample._uses_same_padding()
+    assert model.get_submodule("model.3.conv").out_bits is None

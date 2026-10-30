@@ -17,5 +17,15 @@ drop_misaligned_splits: []
 # of view, then scaled to img_size; boxes clipped). warp keeps every RGB
 # label and the full frame, so results stay comparable to RGB-only models.
 ir_alignment: warp
+# Light geometric augmentation of the training split (MultispectralPersonDataset):
+# one random transform shared by RGB, IR and the boxes, applied after IR
+# alignment. Horizontal flip with probability fliplr, zoom by [1 - scale,
+# 1 + scale], shift by up to translate of the frame. No vertical flips or
+# rotations (part of the footage is oblique). null turns it off; configs saved
+# before it existed have none, so old runs reproduce unchanged.
+augment:
+  fliplr: 0.5
+  scale: 0.25
+  translate: 0.1
 batch_size: 8
 num_workers: 8

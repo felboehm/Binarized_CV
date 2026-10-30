@@ -227,8 +227,10 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       the plateau rule likely stopped them early on the noisy val set
       (`docs/labnotes.md` 2026-10-11); needs a checked stopping rule and
       seeds before it serves as the BNN warm start.
-- [ ] Establish baseline inference benchmarking harness (latency, FPS) on
-      target hardware
+- [x] Establish baseline inference benchmarking harness (latency, FPS):
+      `scripts/benchmark_efficiency.py` / `run_efficiency.sh`, first numbers
+      on the dev laptop (Core Ultra 5 135H, RTX 2050) in `docs/labnotes.md`
+      2026-10-24. Still to run on the target board
 
 ## 5. Binarization Implementation
 - [x] Binarization scope decided: **selective (mixed-precision) binarization,
@@ -314,9 +316,14 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
       resolution/batch size
 - [ ] Power measurement setup: hardware power meter (e.g. USB inline power
       meter for RPi, INA219/INA226 or Jetson's onboard power rails for Jetson)
-      + measurement script, report energy-per-inference (mJ) not just watts
+      + measurement script, report energy-per-inference (mJ) not just watts.
+      Software counters done (RAPL, NVML: mJ/image in
+      `benchmark_efficiency.py`); hardware meter for the board still open
 - [ ] Model size / memory footprint comparison (binarized weights compress
-      ~32x in theory — measure actual on-disk and in-memory size)
+      ~32x in theory — measure actual on-disk and in-memory size). Packed
+      size computed (`deployed_size`: early fusion 9,286 → 2,068 KiB
+      `ib_guided`, 741 KiB + binary attention); no packed file written and
+      no in-memory measurement yet
 - [ ] Throughput (FPS) at matched batch size/resolution across all compared
       models
 - [ ] Confirm results are averaged over enough runs with variance reported
@@ -334,7 +341,23 @@ full-precision YOLO26 and other SOTA efficient/edge detectors.
 ## 10. Deployment Validation (if in scope)
 - [ ] Export/deploy path to target UAV compute (ONNX/TensorRT or custom BNN
       runtime) — confirm the binarized ops actually run efficiently on target
-      hardware, not just simulated in PyTorch
+      hardware, not just simulated in PyTorch. Larq Compute Engine (LCE)
+      feasibility test done (`docs/labnotes.md` 2026-10-24): binary convs
+      convert to real `LceBconv2d` from Larq-built Keras and via ONNX →
+      onnx2tf; via ONNX, stride-2 binary convs fall back to fp and 8-bit
+      layers lose int8. Pick route: rebuild in Keras/Larq vs fix the ONNX path
+- [ ] **Phase out the non-deployable quantization defaults.** The simulation
+      by default pads stride-2 binary convs symmetrically (LCE miscompiles
+      these), puts k-bit activations on a grid with a non-integer zero point
+      and leaves k-bit conv outputs unquantized. The deployment-faithful
+      behaviour is opt-in for now (`model.binarization.binary_padding=same`,
+      `integer_zero_point=true`, `quantize_output=true`) so existing
+      checkpoints evaluate as trained. Once fine-tuned/retrained checkpoints
+      with these options replace the current ones: make them the default,
+      then remove the old behaviour (or keep it only to evaluate old
+      checkpoints). Cost without fine-tune measured (`docs/labnotes.md`
+      2026-10-24): none for mid fusion with the IR stream fp; −0.07 test
+      AP50 when the IR stream is binarized, all from `SAME` padding
 - [ ] End-to-end on-device demo (video feed → detections) for thesis defense
 
 ## 11. Writing & Documentation

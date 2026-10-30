@@ -109,3 +109,76 @@ def test_gradients_reach_latent_weights_and_inputs(bits):
 def test_invalid_bits_rejected():
     with pytest.raises(ValueError):
         QuantConv2d(4, 4, 3, w_bits=0, a_bits=1)
+
+
+def _strided_binary(**kwargs):
+    torch.manual_seed(0)
+    conv = nn.Conv2d(8, 16, 3, stride=2, padding=1, bias=False)
+    return QuantConv2d.from_conv(conv, w_bits=1, a_bits=1, **kwargs).eval()
+
+
+def test_same_padding_samples_tf_windows():
+    q = _strided_binary(binary_padding="same")
+    x = torch.randn(1, 8, 8, 8)
+    y = q(x)
+    a, w = q.quantized_input(x), q.quantized_weight()
+    assert y.shape[-2:] == (4, 4)
+    # TF SAME: window 0 starts at row/col 0; the last one overhangs the
+    # bottom/right edge by one zero row/column.
+    first = (a[0, :, 0:3, 0:3] * w).sum(dim=(1, 2, 3))
+    last = (a[0, :, 6:8, 6:8] * w[:, :, 0:2, 0:2]).sum(dim=(1, 2, 3))
+    torch.testing.assert_close(y[0, :, 0, 0], first)
+    torch.testing.assert_close(y[0, :, -1, -1], last)
+
+
+def test_same_padding_amounts_and_symmetric_default():
+    q = _strided_binary(binary_padding="same")
+    assert q._same_padding(torch.zeros(1, 8, 8, 8)) == (0, 1, 0, 1)
+    assert q._same_padding(torch.zeros(1, 8, 7, 7)) == (1, 1, 1, 1)
+    x = torch.randn(1, 8, 8, 8)
+    default = _strided_binary()
+    torch.testing.assert_close(default(x), default._conv_forward(default.quantized_input(x), default.quantized_weight(), None))
+    assert not torch.allclose(q(x), default(x))
+
+
+def test_same_padding_leaves_stride_one_convs_unchanged():
+    torch.manual_seed(0)
+    conv = nn.Conv2d(8, 16, 3, padding=1, bias=False)
+    same = QuantConv2d.from_conv(conv, w_bits=1, a_bits=1, binary_padding="same").eval()
+    plain = QuantConv2d.from_conv(conv, w_bits=1, a_bits=1).eval()
+    x = torch.randn(1, 8, 8, 8)
+    plain(x)  # initialises the threshold
+    same.load_state_dict(plain.state_dict())
+    torch.testing.assert_close(same(x), plain(x))
+
+
+def test_integer_zero_point_matches_torch_fake_quantize():
+    q = QuantConv2d.from_conv(_conv(), w_bits=8, a_bits=8, integer_zero_point=True)
+    x = torch.randn(2, 8, 6, 6) + 0.3
+    xq = q.quantized_input(x)
+    lo, hi = min(x.min().item(), 0.0), max(x.max().item(), 0.0)
+    scale = (hi - lo) / 255
+    zero = round(-lo / scale)
+    torch.testing.assert_close(xq, torch.fake_quantize_per_tensor_affine(x, scale, zero, 0, 255))
+    assert q._fake_quantize(torch.zeros(1), q.act_range, 8).item() == 0.0  # 0 is on the grid
+
+
+def test_quantize_output_puts_kbit_output_on_a_grid():
+    q = QuantConv2d.from_conv(_conv(), w_bits=4, a_bits=4, quantize_output=True)
+    y = q(torch.randn(2, 8, 6, 6))
+    assert q.out_initialized and y.unique().numel() <= 2**4
+    binary = QuantConv2d.from_conv(_conv(), w_bits=1, a_bits=1, quantize_output=True)
+    assert binary.out_bits is None  # binary conv outputs stay real-valued
+
+
+def test_old_checkpoint_loads_into_quantize_output_layer():
+    old = QuantConv2d.from_conv(_conv(), w_bits=8, a_bits=8)
+    old(torch.randn(2, 8, 6, 6))
+    new = QuantConv2d.from_conv(_conv(), w_bits=8, a_bits=8, quantize_output=True)
+    new.load_state_dict(old.state_dict())  # strict
+    assert torch.equal(new.act_range, old.act_range) and not new.out_initialized
+
+
+def test_invalid_binary_padding_rejected():
+    with pytest.raises(ValueError):
+        QuantConv2d(4, 4, 3, w_bits=1, a_bits=1, binary_padding="valid")

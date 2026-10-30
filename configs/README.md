@@ -10,9 +10,12 @@ Hydra-style YAML configs, one subtree per concern, composed by
 - `eval/` — checkpoint path to load for evaluation
 
 Add a `model/<name>.yaml` (with `name: <name>`) whenever a new model is
-registered — see `src/binarized_cv/models/registry.py`. Binarization-scope
-and distillation settings (`CHECKLIST.md` sections 5-6) aren't in the
-configs yet since that implementation hasn't landed.
+registered — see `src/binarized_cv/models/registry.py`. The `*_bnn` model
+configs add a `binarization` block: preset, per-region precision overrides,
+and the opt-in deployment-faithful options (`binary_padding`,
+`integer_zero_point`, `quantize_output`; README §5). Distillation settings
+(`CHECKLIST.md` sections 5-6) aren't in the configs yet since that
+implementation hasn't landed.
 
 `train/train.py` and `eval/evaluate.py` load these via Hydra's
 `compose`/`initialize` API rather than the `@hydra.main` CLI decorator —

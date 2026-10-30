@@ -47,7 +47,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
 
 
 def build_dataloader(
-    cfg: DictConfig, split: str, shuffle: bool, generator: torch.Generator | None = None
+    cfg: DictConfig, split: str, shuffle: bool, generator: torch.Generator | None = None, augment: bool = False
 ) -> DataLoader:
     records = load_manifest(cfg.data.manifest_path)
     dataset = MultispectralPersonDataset(
@@ -58,6 +58,8 @@ def build_dataloader(
         target_modality=cfg.data.target_modality,
         drop_misaligned=split in cfg.data.get("drop_misaligned_splits", []),
         ir_alignment=cfg.data.get("ir_alignment", "none"),
+        # Configs saved before augmentation existed have no data.augment: off.
+        augment=OmegaConf.to_container(cfg.data.augment) if augment and cfg.data.get("augment") else None,
     )
     return DataLoader(
         dataset,
@@ -361,7 +363,7 @@ def main(cfg: DictConfig | None = None, model_name: str | None = None) -> torch.
     log.info("seed: %s", seed)
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(cfg.model).to(device)
-    train_loader = build_dataloader(cfg, split="train", shuffle=True, generator=generator)
+    train_loader = build_dataloader(cfg, split="train", shuffle=True, generator=generator, augment=True)
     optimizer = build_optimizer(model, cfg.train)
     scheduler = build_scheduler(optimizer, cfg.train, len(train_loader))
     binarized = has_quantized_layers(model)

@@ -44,7 +44,8 @@ pip install -r requirements.txt   # pinned versions the experiments ran with (Py
 pip install -e . --no-deps
 ```
 
-`pip install -e ".[dev]"` alone also works, with unpinned versions. The pinned
+`pip install -e ".[dev]"` alone also works, with unpinned versions (add
+`bench` for GPU energy measurement: `".[dev,bench]"`). The pinned
 torch wheel is the CUDA 13 build (NVIDIA driver >= 580). For an older driver,
 see the header of `requirements.txt` for installing the CUDA 12 build.
 
@@ -205,7 +206,8 @@ The comprehensive script generates:
 ### 5. Binarization
 
 Binarized variants reuse the same detectors with a `binarization` block
-(`configs/model/yolo26_bnn.yaml`, `configs/model/yolo26_early_fusion_bnn.yaml`).
+(`configs/model/yolo26_bnn.yaml`, `configs/model/yolo26_early_fusion_bnn.yaml`,
+`configs/model/yolo26_midfusion_bnn.yaml`).
 The network is not fully binarized: the default `ib_guided` preset makes the
 deep backbone and deep neck binary, keeps the P3 (small-object) path and the
 one2one head at 8-bit, and leaves the stem, input conv and attention in full
@@ -242,6 +244,53 @@ be given as a `model=<name>` override (the script refuses to run without
 one). A stopped run continues with `train.resume=<run dir>/last.pt`.
 
 The quantization is simulated in PyTorch. It measures accuracy, not speed.
+
+By default the simulation differs from what a real binary/int8 runtime
+computes in three ways. Opt-in options make it deployment-faithful; they are
+off so existing checkpoints evaluate as trained, and become the default once
+retrained checkpoints replace those (`CHECKLIST.md` section 10):
+
+```bash
+python -m binarized_cv.train.train model=yolo26_early_fusion_bnn \
+  model.init_checkpoint=runs/checkpoints/yolo26_early_fusion/<ts>/best.pt \
+  model.binarization.binary_padding=same \
+  model.binarization.integer_zero_point=true \
+  model.binarization.quantize_output=true
+# binary_padding=same:     stride-2 binary convs pad like TF/LCE "SAME"
+# integer_zero_point=true: k-bit activations use an integer zero point
+# quantize_output=true:    k-bit conv outputs are quantized too
+```
+
+With these on, a toy model exported through Larq Compute Engine matches the
+PyTorch simulation exactly; without them, LCE miscompiles stride-2 binary
+convs (`docs/labnotes.md` 2026-10-24). A model trained without them needs a
+fine-tune before export.
+
+### 5b. Efficiency benchmarking
+
+`scripts/benchmark_efficiency.py` measures one model config: MACs per
+precision, OPs (fp MACs + BOPs/64), packed model size, latency/FPS and energy
+per image (RAPL on the CPU, NVML on the GPU). `scripts/run_efficiency.sh` runs
+the comparison set on CPU and GPU, `scripts/collect_efficiency.py` tables the
+results.
+
+```bash
+python scripts/benchmark_efficiency.py runs/efficiency/ef_fp32_cpu.json --cpus 0,2,4,6 -- model=yolo26_early_fusion
+python scripts/benchmark_efficiency.py runs/efficiency/ef_fp32_gpu.json --device cuda -- model=yolo26_early_fusion
+bash scripts/run_efficiency.sh            # all configs, cpu + cuda -> runs/efficiency/<host>/
+python scripts/collect_efficiency.py
+```
+
+- Binarized models are simulated, so their latency/energy measure the
+  simulation (marked `sim`); only their OPs and packed size describe the
+  deployed model.
+- On hybrid CPUs, pin to the performance cores, one thread per core
+  (`--cpus`). torch's default thread count also uses the E-cores and was 2.2×
+  slower here.
+- RAPL is root-only by default. For CPU energy run
+  `sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj` before the run
+  and `o-r` after: readable RAPL counters are a known side channel
+  (PLATYPUS, CVE-2020-8694).
 
 See `configs/README.md` for how the config groups fit together, and `docs/labnotes.md` (2026-09-07) for why the CLI
 uses Hydra's `compose`/`initialize` API rather than `@hydra.main`.
@@ -408,6 +457,22 @@ As of 2026-10-13. Details in `CHECKLIST.md` and `docs/labnotes.md`.
   A fully binarized network is therefore ruled out; the default is the selective
   `ib_guided` map. See `docs/binarization_findings.md`.
 
+- **Efficiency** (2026-10-24, dev laptop: Core Ultra 5 135H on 4 P-cores,
+  RTX 2050; batch 1, 640×640; `docs/labnotes.md` 2026-10-24):
+
+  | model | OPs (G) | packed (KiB) | CPU ms | CPU mJ/img | GPU ms |
+  |---|---|---|---|---|---|
+  | `yolo26` RGB fp32 | 2.65 | 9,285 | 35.4 | 1,425 | 8.5 |
+  | early fusion fp32 | 2.67 | 9,286 | 38.4 | 1,671 | 7.5 |
+  | early fusion `ib_guided` | 1.46 | 2,068 | sim | sim | sim |
+  | + binary attention | 1.31 | 741 | sim | sim | sim |
+  | mid fusion fp32 | 3.78 | 10,617 | 46.2 | 1,943 | 11.8 |
+
+  `ib_guided` cuts OPs only 1.8×: the 8-bit P3 path and head are now most of
+  the remaining OPs. Real BNN latency needs the target board (ARM) and a
+  binary runtime; a Larq Compute Engine feasibility test converted binary
+  convs to real binary ops, see `CHECKLIST.md` section 10.
+
 **Next**:
 1. Retrain the early fusion fp32 baseline (3 seeds) with the new defaults
    of 2026-10-13: warp without the misaligned-frame filter, weight EMA, eval
@@ -417,8 +482,12 @@ As of 2026-10-13. Details in `CHECKLIST.md` and `docs/labnotes.md`.
    fp32 control / `ib_guided` / `ib_guided` + binary attention seed
    comparison (`submit_seeds.sh`).
 3. Wire up the mid-fusion forward pass.
-4. A real-kernel latency benchmark on the target CPU; nothing here measures
-   speed yet.
+4. Deployment: evaluate the existing BNN checkpoints with the
+   deployment-faithful options (§5), fine-tune with them on, then export to
+   Larq Compute Engine (Keras/Larq rebuild or the ONNX path) and benchmark on
+   the target board. The harness (`scripts/benchmark_efficiency.py`) measures
+   fp32 models; binarized ones are simulated, so only their OPs and packed
+   size count so far (`docs/labnotes.md` 2026-10-24).
 
 ## License
 

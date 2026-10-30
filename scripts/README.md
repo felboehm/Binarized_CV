@@ -33,7 +33,15 @@ Standalone entry points, not library code:
 - `align_manifest.py` — writes `data/processed/manifest_aligned.jsonl`: per
   record an IR -> VIS transform, re-paired IR frame (VIS/IR videos drift by
   ~1 frame) and remaining error (`align_err_px`), plus a summary `.md`
-- `benchmark_latency.py` — inference latency/FPS on target hardware [NOT YET IMPLEMENTED]
-- `measure_power.py` — energy-per-inference measurement harness [NOT YET IMPLEMENTED]
+- `benchmark_efficiency.py` — one model config: OPs (FLOPs + BOPs/64),
+  packed model size, latency/FPS and energy per image (RAPL for CPU, NVML for
+  GPU), as JSON. Binary/k-bit layers are simulated, so a quantized model's
+  latency/energy is that of the simulation (marked `simulated_quantization`);
+  its OPs and packed size are the meaningful numbers. Pin CPU runs to the
+  P-cores (`--cpus 0,2,4,6`)
+- `run_efficiency.sh` — `benchmark_efficiency.py` over the comparison set
+  (RGB / early / mid fusion × fp32 / `ib_guided` / + binary attention,
+  MS-YOLOv8) on CPU and GPU, into `runs/efficiency/<host>/`
+- `collect_efficiency.py` — Markdown table of those JSONs
 
 See `CHECKLIST.md` section 8 for latency/power benchmarking status.

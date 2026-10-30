@@ -25,3 +25,9 @@ binarization:
   stochastic: false
   skip_depthwise: true
   depthwise_fallback_bits: 8
+  # Deployment-faithful quantization, opt-in until retrained checkpoints
+  # replace the current ones (CHECKLIST.md section 10):
+  # same = stride-2 binary convs pad like TF/LCE "SAME" (bottom/right only).
+  binary_padding: symmetric  # symmetric | same
+  integer_zero_point: false  # k-bit inputs: integer zero point, range incl. 0
+  quantize_output: false  # k-bit convs: fake-quantize the output too

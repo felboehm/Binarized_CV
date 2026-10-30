@@ -136,3 +136,57 @@ def test_ir_alignment_falls_back_without_transform(tmp_path):
 
     assert item["ir"].shape == (1, 96, 128)
     torch.testing.assert_close(item["targets"]["boxes"], torch.tensor([[0.5, 0.5, 0.2, 0.3]]))
+
+
+def _write_marked_pair(root):
+    """64x64 pair, black except a bright square at x 8..15, y 24..39 in both
+    modalities, with one box exactly on it."""
+    rgb = np.zeros((64, 64, 3), np.uint8)
+    rgb[24:40, 8:16] = 255
+    ir = np.zeros((64, 64), np.uint8)
+    ir[24:40, 8:16] = 200
+    Image.fromarray(rgb).save(root / "rgb.png")
+    Image.fromarray(ir).save(root / "ir.png")
+    (root / "rgb.txt").write_text("0 0.1875 0.5 0.125 0.25\n")
+    (root / "ir.txt").write_text("0 0.1875 0.5 0.125 0.25\n")
+    return dataclasses.replace(_record(), rgb_image="rgb.png", ir_image="ir.png")
+
+
+def test_augment_flip_mirrors_both_modalities_and_boxes(tmp_path):
+    record = _write_marked_pair(tmp_path)
+    plain = MultispectralPersonDataset([record], tmp_path, img_size=(64, 64))[0]
+    item = MultispectralPersonDataset(
+        [record], tmp_path, img_size=(64, 64), augment={"fliplr": 1.0, "scale": 0.0, "translate": 0.0}
+    )[0]
+
+    torch.testing.assert_close(item["rgb"], plain["rgb"].flip(-1))
+    torch.testing.assert_close(item["ir"], plain["ir"].flip(-1))
+    torch.testing.assert_close(item["targets"]["boxes"], torch.tensor([[1 - 0.1875, 0.5, 0.125, 0.25]]))
+
+
+def test_augment_keeps_boxes_on_the_content(tmp_path):
+    record = _write_marked_pair(tmp_path)
+    dataset = MultispectralPersonDataset(
+        [record], tmp_path, img_size=(64, 64), augment={"fliplr": 0.5, "scale": 0.25, "translate": 0.1}
+    )
+    torch.manual_seed(0)
+    for _ in range(20):
+        item = dataset[0]
+        boxes = item["targets"]["boxes"]
+        assert len(boxes) == len(item["targets"]["labels"])
+        if len(boxes) == 0:
+            continue
+        cx, cy, w, h = (boxes[0] * 64).tolist()
+        inside = item["ir"][0, round(cy - h / 2) + 1 : round(cy + h / 2) - 1, round(cx - w / 2) + 1 : round(cx + w / 2) - 1]
+        assert inside.min() > 0.5  # the box still sits on the bright square
+        assert item["rgb"].mean() == pytest.approx(item["ir"].mean() * 255 / 200, abs=0.02)  # same transform
+
+
+def test_augment_drops_boxes_pushed_out_of_frame(tmp_path):
+    record = _write_marked_pair(tmp_path)
+    # The square (x 8..16) is under half visible once shifted left by more
+    # than 12 px; shifts of up to 16 px make that 1 in 8 draws.
+    dataset = MultispectralPersonDataset([record], tmp_path, img_size=(64, 64), augment={"translate": 0.25})
+    torch.manual_seed(0)
+    counts = {len(dataset[0]["targets"]["boxes"]) for _ in range(100)}
+    assert counts == {0, 1}

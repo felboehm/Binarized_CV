@@ -23,6 +23,10 @@ dev = [
     "pytest",
     "ruff",
 ]
+# GPU energy in scripts/benchmark_efficiency.py
+bench = [
+    "nvidia-ml-py",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
